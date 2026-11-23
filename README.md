@@ -1,37 +1,41 @@
-# 币安开平仓记录
+# Binance Copy Trading History
 
-使用 Vue 3、Vite 和 Element Plus，在一张表里查看多个币安公域带单组合的开仓和平仓成交。
+View filled opening and closing orders from multiple public Binance lead portfolios in one table. Built with Vue 3, Vite, and Element Plus.
 
-## 启动
+## Getting started
 
-需要 Node.js 22.21+（22.x）或 24.5+。
+Requires Node.js 22.21 or later in the 22.x series, or Node.js 24.5 or later.
 
 ```sh
 npm ci
 npm run dev
 ```
 
-打开 Vite 打印的本机地址。页面预填 Btc星辰的公域组合 ID。要查看多人，在输入框每行填一个币安带单详情页链接或组合 ID。默认选中北京时间最近 7 天，可在官网开放的最近 30 天内改选日期。点击「查询」将各组合的成交按更新时间从新到旧合并，点击「查看更早成交」继续读取有下一页的组合。每条成交显示币安昵称，昵称暂不可用时显示组合 ID。
+Open the local URL printed by Vite. The page starts with the public portfolio IDs for Aoying Capital and Btc Xingchen. Edit the list directly, entering one Binance lead portfolio URL or ID per line. The default range is the last seven days in Beijing time. You can select dates within the last 30 days available on Binance.
+
+Run a query to merge trades from the selected portfolios and sort them by most recent update. Use the button below the table to load older trades from portfolios with another page. Each row shows the trader's Binance nickname or the portfolio ID when the nickname is unavailable.
 
 ```sh
 npm run build
 npm run preview
 ```
 
-开发和构建预览均通过 Vite 转发给币安官网。如本机通过 HTTP 代理上网，连接沿用 Node.js 的 `HTTPS_PROXY` 和 `NO_PROXY` 环境变量。单独托管 `dist` 时，需提供相同的 `/api/binance/latest-records` 和 `/api/binance/portfolio-detail` 转发路径。
+The Vite development and preview servers proxy requests to the Binance website. If you use an HTTP proxy, Node.js honors the `HTTPS_PROXY` and `NO_PROXY` environment variables. If you host `dist` separately, provide proxy routes at `/api/binance/latest-records` and `/api/binance/portfolio-detail`.
 
-## Sites 部署
+## Sites deployment
 
-`npm run build:sites` 生成 Sites Worker 入口 `dist/server/index.js`。Worker 提供 Vue 页面，并在同一个站点下转发成交和昵称查询。部署后的监控仍由打开网页的浏览器轮询。
+`npm run build:sites` generates the Sites Worker entry point at `dist/server/index.js`. The Worker serves the Vue app and proxies trade and nickname lookups on the same site. The browser polls while the page is open.
 
-## 监控
+## Monitoring
 
-点击「开始监控」按输入顺序轮询所有组合，自动刷新每人最近 7 天的第一页。查完一个组合后等 5 秒再查下一人。监控三人时，同一人的刷新至少需要约 15 秒，外加各次请求耗时。普通繁忙或网络错误会保留该组合的上次结果，并按原间隔继续轮询。上游要求等待时遵循 `Retry-After`，明确拒绝访问或返回未指定重试时间的限额时暂停查询。点击「停止监控」或关闭页面即可停止。
+Start monitoring to poll portfolios in the order entered and refresh the first page of each portfolio's trades from the last seven days. The browser waits five seconds after each portfolio before querying the next. With three portfolios, each refresh cycle takes about 15 seconds plus request time.
 
-## 数据范围
+During temporary service or network errors, the app keeps the last results for the affected portfolio and continues polling at the same interval. It honors `Retry-After` and pauses polling if Binance denies access or returns a rate limit without a retry time. Stop monitoring or close the page to end polling.
 
-成交和昵称来自币安组合详情页使用的 `lead-portfolio/order-history` 和 `lead-portfolio/detail`。记录覆盖范围和时间筛选口径由币安接口决定。
+## Data coverage
 
-页面展示有成交数量的双向持仓记录。`LONG` + `BUY` 为开多，`SHORT` + `SELL` 为开空，`LONG` + `SELL` 为平多，`SHORT` + `BUY` 为平空。开多和开空包含同向加仓，平多和平空包含部分减仓。单向持仓的 `BOTH` 记录缺少可确定开平仓的字段。
+Trades and nicknames come from `lead-portfolio/order-history` and `lead-portfolio/detail`, the endpoints used by Binance's lead portfolio pages. Binance determines the available records and how the date filter is applied.
 
-表格的订单更新时间统一显示为北京时间（UTC+8）。请求耗时从浏览器发出成交查询算到解析完成。成交出现的时间取决于币安公布时间和轮询进度。
+The app shows hedge-mode orders with a nonzero filled quantity. `LONG` + `BUY` opens or adds to a long position, and `SHORT` + `SELL` opens or adds to a short position. `LONG` + `SELL` reduces or closes a long position, and `SHORT` + `BUY` reduces or closes a short position. One-way mode records marked `BOTH` lack the fields needed to classify them as opening or closing trades.
+
+The table shows order update times in Beijing time (UTC+8). Request duration runs from the browser sending the trade query to finishing response parsing. When a trade appears depends on when Binance publishes it and when the browser polls next.

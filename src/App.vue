@@ -33,14 +33,17 @@ type QueryMode = 'search' | 'monitor' | 'more'
 
 const BINANCE_INTERVAL_MS = 5_000
 const now = Date.now()
-const defaultPortfolioId = '4751838302089254401'
+const defaultPortfolioIds = [
+  '5075281354358777856', // 熬鹰资本
+  '4751838302089254401', // Btc星辰
+]
 const today = ref(shanghaiDate(now))
 const earliestDate = computed(() => shanghaiDate(dayStart(today.value) - 29 * DAY_MS))
-const portfolioInput = ref(defaultPortfolioId)
+const portfolioInput = ref(defaultPortfolioIds.join('\n'))
 const startDate = ref(shanghaiDate(now - 6 * DAY_MS))
 const endDate = ref(today.value)
 const query = ref<DateRange>()
-const portfolios = ref([createPortfolio(defaultPortfolioId)])
+const portfolios = ref(defaultPortfolioIds.map(createPortfolio))
 const portfolioNames = reactive(new Map<string, string>())
 const queryNotice = ref('')
 const error = ref('')
