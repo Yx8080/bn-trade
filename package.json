@@ -5,15 +5,17 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "test": "node --test",
     "build": "vue-tsc --noEmit && vite build",
-    "build:sites": "npm run build && node scripts/build-sites.mjs",
+    "start": "node --env-file-if-exists=.env.local server/index.js",
     "preview": "vite preview --host 127.0.0.1"
   },
   "engines": {
     "node": "^22.21.0 || >=24.5.0"
   },
   "dependencies": {
-    "element-plus": "^2.14.8",
+    "@element-plus/icons-vue": "^2.3.2",
+    "undici": "^7.30.2",
     "vue": "^3.5.45"
   },
   "devDependencies": {

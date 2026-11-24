@@ -1,6 +1,7 @@
 node_modules/
+.trade-data/
 dist/
 .playwright-mcp/
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example

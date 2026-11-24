@@ -1,0 +1,247 @@
+.trade-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 18px;
+  background: #e8ece8;
+  border-radius: 9px;
+}
+.trade-tabs button {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 7px 15px;
+  font-size: 14px;
+}
+.trade-tabs button[aria-pressed='true'] {
+  background: white;
+  color: var(--green);
+  box-shadow: 0 1px 4px #172e2e12;
+}
+.trading-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 17px;
+  align-items: start;
+  margin-bottom: 20px;
+}
+.market-body,
+.ticket-form {
+  padding: 0 21px 20px;
+}
+.symbol-search {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+.symbol-search .field {
+  flex: 1;
+}
+.symbol-picks {
+  display: flex;
+  gap: 6px;
+  margin: 9px 0 17px;
+}
+.symbol-picks button {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 4px 8px;
+}
+.symbol-picks button.picked {
+  color: #285c42;
+  border-color: #abd2b3;
+  background: #f0f7eb;
+}
+.quote-board {
+  padding: 18px 19px;
+  border-radius: 10px;
+  background: linear-gradient(105deg, #173d32, #214936);
+  color: #f1f8ed;
+}
+.quote-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 7px;
+  margin-bottom: 17px;
+}
+.quote-title strong {
+  font-size: 20px;
+  letter-spacing: -0.025em;
+}
+.quote-title small,
+.quote-title span,
+.quote-label,
+.quote-time,
+.quote-mark {
+  font-size: 12px;
+  color: #c6d7c7;
+  font-weight: 470;
+}
+.quote-price {
+  font-size: clamp(20px, 3vw, 38px);
+  font-weight: 650;
+  letter-spacing: -0.04em;
+  color: #dcf4ad;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.quote-price small {
+  margin-left: 1px;
+  color: #d0ddc6;
+}
+.quote-mark {
+  margin-top: 5px;
+}
+.quote-mark strong {
+  color: #f4f7ec;
+  margin-left: 4px;
+}
+.pnl-estimate {
+  margin-top: 15px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.pnl-estimate summary {
+  cursor: pointer;
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 620;
+}
+.estimate-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 12px;
+}
+.estimated-result {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+  margin: 12px 0 5px;
+  font-size: 13px;
+}
+.quote-time {
+  margin-top: 14px;
+  font-size: 11px;
+}
+.quote-time + .quote-time {
+  margin-top: 3px;
+}
+.ticket-form {
+  display: grid;
+  gap: 12px;
+}
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-radius: 7px;
+  padding: 3px;
+  background: #f1f4ef;
+}
+.segmented button {
+  height: 31px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 13px;
+}
+.segmented button.buy {
+  background: #dceedd;
+  color: #175b33;
+  font-weight: 620;
+}
+.segmented button.sell {
+  background: #f3ded7;
+  color: #98402f;
+  font-weight: 620;
+}
+.two-fields {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.input-unit {
+  position: relative;
+  display: block;
+}
+.input-unit input {
+  padding-right: 74px;
+}
+.input-unit b {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  color: var(--muted);
+}
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.checkbox input {
+  accent-color: var(--green);
+  margin: 0;
+}
+.order-review {
+  margin: 10px 0;
+}
+.order-review div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.order-review dt {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.order-review dd {
+  font-weight: 600;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.receipt {
+  color: #205c39;
+  background: #edf6e9;
+}
+.receipt .text-button {
+  margin-right: 10px;
+}
+.account-tabs {
+  display: flex;
+  gap: 18px;
+  margin: 0 22px;
+}
+.account-tabs button {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 4px 2px 10px;
+}
+.account-tabs button.active {
+  color: var(--green);
+  border-bottom-color: var(--green);
+  font-weight: 650;
+}
+.blank-row {
+  padding: 27px 16px;
+  text-align: center;
+}
