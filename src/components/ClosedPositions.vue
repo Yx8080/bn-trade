@@ -2,9 +2,9 @@
 import { computed, ref, watch } from 'vue'
 import { Finished, Refresh } from '@element-plus/icons-vue'
 import type { LeadPortfolio } from '../portfolios'
-import { fetchClosedPositions, formatNumber, formatTradeTime, type ClosedPosition } from '../trades'
+import { fetchClosedPositions, formatNumber, formatTradeAmount, formatTradeTime, type ClosedPosition } from '../trades'
 
-const props = defineProps<{ entries: LeadPortfolio[] }>()
+const props = defineProps<{ entries: LeadPortfolio[]; updatedAtById: Record<string, number> }>()
 const emit = defineEmits<{ quote: [symbol: string] }>()
 const selected = ref(props.entries[0]?.id ?? '')
 const page = ref(1)
@@ -21,6 +21,13 @@ function choosePortfolio(event: Event) {
   page.value = 1
 }
 
+const observedChanges = new Map<string, number>()
+watch([selected, () => props.updatedAtById[selected.value]], ([id, changedAt], [previousId]) => {
+  if (!changedAt || observedChanges.get(id) === changedAt) return
+  observedChanges.set(id, changedAt)
+  if (id === previousId && page.value === 1) refresh.value++
+}, { immediate: true })
+
 watch([selected, page, refresh], async ([id, number], _, onCleanup) => {
   const controller = new AbortController()
   onCleanup(() => controller.abort())
@@ -34,7 +41,7 @@ watch([selected, page, refresh], async ([id, number], _, onCleanup) => {
     if (number > pages) page.value = pages
     else lastResult.value = { id, page: number, pages, rows: result.rows, updatedAt: Date.now() }
   } catch (cause) {
-    if (!controller.signal.aborted) error.value = cause instanceof Error ? cause.message : '暂时无法读取仓位历史。'
+    if (!controller.signal.aborted) error.value = cause instanceof Error ? cause.message : '暂时无法读取本地平仓记录。'
   } finally {
     if (!controller.signal.aborted) loading.value = false
   }
@@ -59,7 +66,7 @@ watch([selected, page, refresh], async ([id, number], _, onCleanup) => {
           <option v-for="entry in entries" :key="entry.id" :value="entry.id">{{ entry.name || entry.id }}</option>
         </select>
       </label>
-      <p>每行是一笔完整仓位，包含该仓位的分批平仓。</p>
+      <p>列表读取本地记录。监控到对应的平仓成交时，才从币安披露中补入缺少的仓位或字段。</p>
     </div>
     <p v-if="error" class="notice error" role="alert">
       {{ error }}
@@ -79,18 +86,19 @@ watch([selected, page, refresh], async ([id, number], _, onCleanup) => {
             </td>
             <td>{{ row.side === 'Long' ? '多仓' : row.side === 'Short' ? '空仓' : row.side || '—' }}</td>
             <td class="numeric pnl-cell" :class="{ gain: (row.closingPnl ?? 0) > 0, loss: (row.closingPnl ?? 0) < 0 }">
-              {{ row.closingPnl == null ? '未披露' : (row.closingPnl > 0 ? '+' : '') + formatNumber(row.closingPnl) }}
+              {{ row.closingPnl == null ? '未披露' : (row.closingPnl > 0 ? '+' : '') + formatTradeAmount(row.closingPnl) }}
               <small v-if="row.closingPnl != null">{{ row.asset }}</small>
             </td>
             <td class="numeric">{{ row.roi == null ? '—' : formatNumber(row.roi * 100) + '%' }}</td>
-            <td class="numeric">{{ formatNumber(row.avgCost) }}</td><td class="numeric">{{ formatNumber(row.avgClosePrice) }}</td>
+            <td class="numeric">{{ formatTradeAmount(row.avgCost) }}</td>
+            <td class="numeric">{{ formatTradeAmount(row.avgClosePrice) }}</td>
             <td class="numeric">{{ formatNumber(row.closedVolume) }}</td>
             <td class="time-cell">{{ row.closed == null ? '—' : formatTradeTime(row.closed) }}</td>
           </tr>
         </tbody>
       </table>
       <p v-if="!rows.length" class="blank-row" role="status">
-        {{ !selected ? '添加带单组合后可查看仓位。' : loading && !currentResult ? '正在读取仓位历史…' : '本页暂无完整平仓记录。' }}
+        {{ !selected ? '添加带单组合后可查看仓位。' : loading && !currentResult ? '正在读取本地记录…' : '本地尚未记录这个组合的整仓平仓披露。' }}
       </p>
     </div>
     <div v-if="portfolioResult" class="ledger-footer">

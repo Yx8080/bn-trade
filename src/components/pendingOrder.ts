@@ -1,9 +1,29 @@
+import type { BoundSession, Environment } from '../futures'
+
 export interface PendingOrder {
   symbol: string
   clientOrderId: string
 }
 
 const memory = new Map<string, PendingOrder>()
+
+export const pendingOrderKey = (owner: string | undefined, environment: Environment, market: 'futures' | 'spot') =>
+  'bn-trade:pending:' + JSON.stringify([owner, environment, market])
+
+export function restorePreviousPending(session: BoundSession) {
+  if (!session.previousWorkspaceId || session.environment !== 'live') return
+  for (const market of session.markets) {
+    const key = pendingOrderKey(session.id, session.environment, market)
+    const previousKey = pendingOrderKey(session.previousWorkspaceId, session.environment, market)
+    const previous = readPending(previousKey)
+    if (!previous || readPending(key)) continue
+    try {
+      sessionStorage.setItem(key, JSON.stringify(previous))
+      writePending(previousKey, null)
+    } catch { /* Keep the original pending order if storage is full. */ }
+    memory.set(key, previous)
+  }
+}
 
 export function readPending(key: string): PendingOrder | null {
   if (memory.has(key)) return memory.get(key)!

@@ -1,9 +1,10 @@
 import {
   ApiError, apiErrorResponse, binanceRequest, getTradingEnvironment, getTradingUser, invalidData, isClientOrderId,
-  isDecimal, isPositiveDecimal, jsonResponse, orderLookup, orderResult, quoteEnvironment, readOrderJson, requireSymbol, reserveOrder,
+  isDecimal, isPositiveDecimal, jsonResponse, orderLookup, quoteEnvironment, readOrderJson, requireSymbol,
 } from './trading.js'
+import { lookupPlatformOrder, submitPlatformOrder } from './platform-orders.js'
 
-const bases = { testnet: 'https://testnet.binance.vision', live: 'https://api.binance.com' }
+export const spotBases = { testnet: 'https://testnet.binance.vision', live: 'https://api.binance.com' }
 const orderFields = new Set(['environment', 'symbol', 'quoteOrderQty', 'clientOrderId'])
 
 function fillAverage(quoteTotal, quantity) {
@@ -19,10 +20,18 @@ function fillAverage(quoteTotal, quantity) {
   return digits.slice(0, -18) + (fraction ? '.' + fraction : '')
 }
 
+export function spotBalances(data) {
+  if (!Array.isArray(data.balances)) throw invalidData()
+  return data.balances.flatMap(({ asset, free, locked }) => {
+    if (typeof asset !== 'string' || !isDecimal(free) || !isDecimal(locked)) throw invalidData()
+    return Number(free) || Number(locked) ? [{ asset, free, locked }] : []
+  })
+}
+
 async function route(request, env) {
   const { pathname, searchParams } = new URL(request.url)
   const environment = getTradingEnvironment(env)
-  const base = bases[environment]
+  const base = spotBases[environment]
   const methods = {
     '/api/spot/quote': ['GET'], '/api/spot/account': ['GET'], '/api/spot/orders': ['GET', 'POST'],
   }[pathname]
@@ -33,28 +42,23 @@ async function route(request, env) {
   if (pathname === '/api/spot/quote') {
     const market = quoteEnvironment(searchParams, environment)
     const symbol = requireSymbol(searchParams.get('symbol'))
-    const ticker = await binanceRequest(env, bases[market], '/api/v3/ticker/price', { params: { symbol } })
+    const ticker = await binanceRequest(env, spotBases[market], '/api/v3/ticker/price', { params: { symbol } })
     if (ticker.symbol !== symbol || !isPositiveDecimal(ticker.price)) throw invalidData()
     return jsonResponse({ symbol, lastPrice: ticker.price, environment: market, time: Date.now() })
   }
-  const user = getTradingUser(request, env)
+  const user = await getTradingUser(request, env)
   if (!user.spotApiKey || !user.spotApiSecret) throw new ApiError(503, 'SPOT_NOT_CONFIGURED', '此账户尚未配置现货密钥。')
   const credentials = { apiKey: user.spotApiKey, apiSecret: user.spotApiSecret }
   if (pathname === '/api/spot/account') {
     const data = await binanceRequest(env, base, '/api/v3/account', { credentials, params: { omitZeroBalances: 'true' } })
-    if (!Array.isArray(data.balances)) throw invalidData()
-    const balances = data.balances.flatMap(({ asset, free, locked }) => {
-      if (typeof asset !== 'string' || !isDecimal(free) || !isDecimal(locked)) throw invalidData()
-      return Number(free) || Number(locked) ? [{ asset, free, locked }] : []
-    })
-    return jsonResponse({ name: user.name, environment, balances })
+    return jsonResponse({ name: user.name, environment, balances: spotBalances(data) })
   }
   const path = '/api/v3/order'
   if (request.method === 'GET') {
     const params = orderLookup(searchParams)
     const data = await binanceRequest(env, base, path, { credentials, params })
     data.avgPrice = fillAverage(data.cummulativeQuoteQty, data.executedQty)
-    return jsonResponse(orderResult(data, params.symbol, params.origClientOrderId))
+    return jsonResponse(lookupPlatformOrder(env, environment, user.id, 'spot', credentials.apiKey, data, params))
   }
   const input = await readOrderJson(request)
   if (input.environment !== environment) {
@@ -67,10 +71,12 @@ async function route(request, env) {
     symbol, side: 'BUY', type: 'MARKET', quoteOrderQty: input.quoteOrderQty,
     newClientOrderId: input.clientOrderId, newOrderRespType: 'RESULT',
   }
-  reserveOrder(env, environment, 'spot', user.id, input.clientOrderId)
-  const data = await binanceRequest(env, base, path, { method: 'POST', credentials, params, order: true })
-  data.avgPrice = fillAverage(data.cummulativeQuoteQty, data.executedQty)
-  return jsonResponse(orderResult(data, symbol, input.clientOrderId, params), 201)
+  const receipt = await submitPlatformOrder(env, environment, user.id, 'spot', credentials.apiKey, params, async () => {
+    const data = await binanceRequest(env, base, path, { method: 'POST', credentials, params, order: true })
+    data.avgPrice = fillAverage(data.cummulativeQuoteQty, data.executedQty)
+    return data
+  })
+  return jsonResponse(receipt, 201)
 }
 
 export async function handleSpot(request, env = {}) {

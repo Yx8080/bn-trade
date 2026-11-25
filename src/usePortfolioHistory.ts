@@ -1,292 +1,217 @@
-import { computed, onUnmounted, reactive, ref } from 'vue'
+import { computed, ref } from 'vue'
 import type { LeadPortfolio } from './portfolios'
-import {
-  DAY_MS,
-  TradeRequestError,
-  fetchBinancePortfolioName,
-  fetchBinanceTradePage,
-  shanghaiDate,
-  tradeDirection,
-  tradeKey,
-  type Trade,
-  type TradePage,
-  type TradeQuery,
-} from './trades'
+import { DAY_MS, fetchObservedTrades, observePortfolios, releaseObservation, shanghaiDate, tradeDirection,
+  type ObservedTrade, type ObservationStatus, type TradeQuery } from './trades'
 
 interface PortfolioResult {
   id: string
-  records: Trade[]
+  records: ObservedTrade[]
   cursor?: string
   loading: boolean
+  paging: boolean
+  loaded: boolean
   error: string
-  lastSuccessAt?: number
-  requests: number
-  successes: number
+  observation?: ObservationStatus
+  refreshedAt: number
 }
 
 type DateRange = Pick<TradeQuery, 'startTime' | 'endTime'>
+const dayStart = (date: string) => Date.parse(date + 'T00:00:00+08:00')
+const errorMessage = (cause: unknown) => cause instanceof Error ? cause.message : '暂时无法连接本地服务。'
 
-export const BINANCE_INTERVAL_MS = 5_000
+function newViewId() {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 15) | 64
+  bytes[8] = (bytes[8] & 63) | 128
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-')
+}
 
 export function usePortfolioHistory(entries: LeadPortfolio[]) {
-  const initialIds = entries.map(entry => entry.id)
   const now = Date.now()
   const today = ref(shanghaiDate(now))
-  const earliestDate = computed(() => shanghaiDate(dayStart(today.value) - 29 * DAY_MS))
   const startDate = ref(shanghaiDate(now - 6 * DAY_MS))
   const endDate = ref(today.value)
   const query = ref<DateRange>()
-  const portfolios = ref(initialIds.map(createPortfolio))
-  const portfolioNames = reactive(new Map(entries.filter(entry => entry.name).map(entry => [entry.id, entry.name])))
-  const queryNotice = ref('')
+  const portfolios = ref<PortfolioResult[]>(entries.map(({ id }) => ({
+    id, records: [], loading: false, paging: false, loaded: false, error: '', refreshedAt: 0,
+  })))
+  const names = new Map(entries.filter(entry => entry.name).map(entry => [entry.id, entry.name]))
+  const portfolioName = (id: string) => names.get(id) ?? id
   const error = ref('')
   const monitoring = ref(false)
-  const lastDurationMs = ref<number>()
-  const loadingPortfolio = computed(() => portfolios.value.find(portfolio => portfolio.loading))
-  const loading = computed(() => loadingPortfolio.value != null)
-  const paging = ref(false)
-  const hasMore = computed(() => portfolios.value.some(portfolio => portfolio.cursor))
-  const failedPortfolios = computed(() => portfolios.value.filter(portfolio => portfolio.error))
-  const activity = computed(() => {
-    const stats = { requests: 0, successes: 0, lastSuccessAt: 0 }
+  const pinned = ref(false)
+  const loading = computed(() => portfolios.value.some(p => p.loading))
+  const paging = computed(() => portfolios.value.some(p => p.paging))
+  const updatedAtById = computed(() => {
+    const updated: Record<string, number> = {}
     for (const portfolio of portfolios.value) {
-      stats.requests += portfolio.requests
-      stats.successes += portfolio.successes
-      stats.lastSuccessAt = Math.max(stats.lastSuccessAt, portfolio.lastSuccessAt ?? 0)
+      const at = portfolio.observation?.lastPositionChangeAt
+      if (typeof at === 'number' && at > 0) updated[portfolio.id] = at
     }
-    return stats
+    return updated
   })
-  const tradeRecords = computed(() => portfolios.value.flatMap(portfolio => {
-    const traderName = portfolioName(portfolio.id)
-    return portfolio.records.flatMap(record => {
-      const direction = tradeDirection(record)
-      return direction ? [{ ...record, direction, portfolioId: portfolio.id, traderName }] : []
-    })
-  }).sort((first, second) => second.orderUpdateTime - first.orderUpdateTime))
-  let queryController: AbortController | undefined
-  let revision = 0
+  const tradeRecords = computed(() => portfolios.value.flatMap(portfolio => portfolio.records.flatMap(record => {
+    const direction = tradeDirection(record)
+    return direction ? [{ ...record, direction, portfolioId: portfolio.id }] : []
+  })).sort((a, b) => b.orderUpdateTime - a.orderUpdateTime))
+
+  let reads = new AbortController()
+  let visit: AbortController | undefined
+  const activeViewIds = new Set<string>()
+  let timer: number | undefined
   let rolling = true
-  let earlier: string[] = []
 
-  onUnmounted(stopQueries)
-
-  function portfolioName(id: string) {
-    return portfolioNames.get(id) ?? id
-  }
-
-  function dayStart(date: string) {
-    return Date.parse(`${date}T00:00:00+08:00`)
-  }
-
-  function createPortfolio(id: string): PortfolioResult {
-    return { id, records: [], loading: false, error: '', requests: 0, successes: 0 }
-  }
-
-  function errorMessage(cause: unknown) {
-    if (cause instanceof DOMException && cause.name === 'TimeoutError') return '查询超时。'
-    if (cause instanceof TypeError) return '连接查询接口失败。'
-    return cause instanceof Error ? cause.message : '查询失败。'
-  }
-
-  function isCurrentRange(range: DateRange) {
-    return query.value?.startTime === range.startTime && query.value.endTime === range.endTime
-  }
-
-  function selectQuery(ids: string[], range: DateRange) {
-    const previous = new Map(isCurrentRange(range) ? portfolios.value.map(portfolio => [portfolio.id, portfolio]) : [])
-    portfolios.value = ids.map(id => previous.get(id) ?? createPortfolio(id))
-    query.value = range
-  }
-
-  function search() {
-    if (!initialIds.length) return
-
-    today.value = shanghaiDate(Date.now())
-    const startTime = dayStart(startDate.value)
-    const endDay = dayStart(endDate.value)
-    if (!Number.isFinite(startTime) || !Number.isFinite(endDay) || startTime > endDay) {
-      error.value = '请选择有效的开始和结束日期。'
-      return
-    }
-    if (startDate.value < earliestDate.value || endDate.value > today.value) {
-      error.value = '请选择币安官网开放的最近 30 天。'
-      return
-    }
-
-    error.value = ''
-    rolling = endDate.value === today.value && startTime === endDay - 6 * DAY_MS
-    selectQuery(initialIds, { startTime, endTime: endDay + DAY_MS - 1 })
-    earlier = []
-    paging.value = false
-    revision++
-    if (!monitoring.value) void monitor()
-  }
-
-  function loadMore() {
-    if (!monitoring.value || paging.value) return
-    earlier = portfolios.value.filter(p => p.cursor).map(p => p.id)
-    paging.value = earlier.length > 0
-  }
-
-  function applyPage(portfolio: PortfolioResult, page: TradePage, cursor?: string) {
-    if (cursor && page.cursor === cursor) {
-      throw new Error('未返回下一页，请稍后重试或缩小日期范围。')
-    }
-
-    if (cursor) {
-      // Binance may repeat the last record of the preceding page at the cursor.
-      const loaded = new Set(portfolio.records.map(tradeKey))
-      portfolio.records.push(...page.list.filter(record => !loaded.has(tradeKey(record))))
-    } else {
-      // Preserve loaded older pages when the newest page still overlaps them.
-      const last = page.list.at(-1)
-      const overlap = last ? portfolio.records.findIndex(row => tradeKey(row) === tradeKey(last)) : -1
-      if (overlap >= 0 && overlap < portfolio.records.length - 1 && page.cursor && page.list.length < page.total) {
-        const keys = new Set(page.list.map(tradeKey))
-        portfolio.records = [...page.list, ...portfolio.records.slice(overlap + 1).filter(row => !keys.has(tradeKey(row)))]
-        return
-      }
-      portfolio.records = page.list
-    }
-    portfolio.cursor = page.list.length && portfolio.records.length < page.total ? page.cursor : undefined
-  }
-
-  async function load(portfolio: PortfolioResult, request: TradeQuery, cursor: string | undefined, signal: AbortSignal) {
+  async function read(portfolio: PortfolioResult, more = false) {
+    if (!query.value || portfolio.loading || (more && !portfolio.cursor)) return
+    const signal = reads.signal
+    const cursor = more ? portfolio.cursor : undefined
+    const sampledAt = portfolio.observation?.lastSuccessAt ?? 0
     portfolio.loading = true
-    const started = performance.now()
+    portfolio.paging = more
     try {
-      const page = await fetchBinanceTradePage(request, cursor, signal)
-      if (signal.aborted || !isCurrentRange(request)) return
-      applyPage(portfolio, page, cursor)
+      const page = await fetchObservedTrades({ ...query.value, portfolioId: portfolio.id }, cursor, signal)
+      if (signal.aborted) return
+      if (cursor) {
+        const existing = new Set(portfolio.records.map(row => row.observedId))
+        portfolio.records.push(...page.list.filter(row => !existing.has(row.observedId)))
+      } else {
+        portfolio.records = page.list
+      }
+      portfolio.cursor = page.cursor
+      portfolio.loaded = true
+      portfolio.refreshedAt = sampledAt
       portfolio.error = ''
-      portfolio.successes++
-      portfolio.lastSuccessAt = Date.now()
     } catch (cause) {
-      if (signal.aborted || !isCurrentRange(request)) return
-      portfolio.error = errorMessage(cause)
-      return cause
+      if (!signal.aborted) portfolio.error = errorMessage(cause)
     } finally {
       if (!signal.aborted) {
         portfolio.loading = false
-        if (isCurrentRange(request)) {
-          portfolio.requests++
-          lastDurationMs.value = Math.round(performance.now() - started)
-        }
+        portfolio.paging = false
       }
     }
   }
 
-  async function loadPortfolioName(id: string, signal: AbortSignal) {
-    if (portfolioNames.has(id)) return
-    try {
-      const name = await fetchBinancePortfolioName(id, signal)
-      if (name && !signal.aborted) portfolioNames.set(id, name)
-    } catch {
-      // The portfolio ID identifies the trader when their nickname is unavailable.
+  function cancelReads() {
+    reads.abort()
+    reads = new AbortController()
+    for (const portfolio of portfolios.value) {
+      portfolio.loading = false
+      portfolio.paging = false
     }
   }
 
-  function stopQueries() {
-    queryController?.abort()
-    queryController = undefined
-    for (const portfolio of portfolios.value) portfolio.loading = false
-    monitoring.value = false
-    paging.value = false
-  }
-
-  async function monitor() {
-    if (monitoring.value || !initialIds.length || !query.value) return
-    const controller = new AbortController()
-    queryController = controller
-    monitoring.value = true
-    let sequence = revision
-    let next = 0
-    let outageDelay = BINANCE_INTERVAL_MS
-    try {
-      while (!controller.signal.aborted) {
-        const day = shanghaiDate(Date.now())
-        if (rolling && day !== today.value) {
-          const start = dayStart(day) - 6 * DAY_MS
-          if (endDate.value === today.value && startDate.value === shanghaiDate(query.value.startTime)) {
-            startDate.value = shanghaiDate(start)
-            endDate.value = day
-          }
-          selectQuery(initialIds, { startTime: start, endTime: dayStart(day) + DAY_MS - 1 })
-          revision++
-          earlier = []
-          paging.value = false
-        }
-        today.value = day
-        if (sequence !== revision) { sequence = revision; next = 0; outageDelay = BINANCE_INTERVAL_MS }
-        const extra = earlier.shift()
-        const portfolio = extra ? portfolios.value.find(item => item.id === extra)! : portfolios.value[next]
-        const request = { ...query.value, portfolioId: portfolio.id }
-        queryNotice.value = ''
-        const [failure] = await Promise.all([
-          load(portfolio, request, extra ? portfolio.cursor : undefined, controller.signal),
-          portfolio.requests === 0 ? loadPortfolioName(portfolio.id, controller.signal) : undefined,
-        ])
-        if (controller.signal.aborted) return
-        paging.value = earlier.length > 0
-        let delay = nextDelay(failure)
-        if (delay === undefined) return
-        if (!extra && sequence === revision) {
-          next = (next + 1) % portfolios.value.length
-          if (!next && portfolios.value.every(item => item.error)) {
-            outageDelay = Math.min(outageDelay * 2, 60_000)
-            delay = Math.max(delay, outageDelay)
-            queryNotice.value = `本轮全部组合查询失败，将在 ${Math.ceil(delay / 1000)} 秒后重试。`
-          } else if (!next) outageDelay = BINANCE_INTERVAL_MS
-        }
-        await waitForNextRequest(delay, controller.signal)
-      }
-    } finally {
-      if (queryController === controller) {
-        monitoring.value = false
-        paging.value = false
-        queryController = undefined
-      }
+  function applyRange(range: DateRange) {
+    cancelReads()
+    query.value = range
+    pinned.value = false
+    for (const portfolio of portfolios.value) {
+      portfolio.records = []
+      portfolio.cursor = undefined
+      portfolio.loaded = false
+      portfolio.error = ''
+      portfolio.refreshedAt = 0
+      void read(portfolio)
     }
   }
 
-  function nextDelay(failure: unknown) {
-    let delay = BINANCE_INTERVAL_MS
-
-    if (failure instanceof TradeRequestError) {
-      if ([401, 403, 418, 451].includes(failure.status)) {
-        queryNotice.value = '币安拒绝访问，已暂停查询。'
-        return
-      }
-      if (failure.status === 429 && !failure.retryAfterMs) {
-        queryNotice.value = '已达币安请求限额，已暂停查询。'
-        return
-      }
-      delay = Math.max(delay, failure.retryAfterMs)
-    }
-    if (delay > 2_147_483_647) {
-      queryNotice.value = '服务端要求延后查询，已暂停查询。'
+  function search() {
+    today.value = shanghaiDate(Date.now())
+    const startTime = dayStart(startDate.value)
+    const endDay = dayStart(endDate.value)
+    if (!Number.isFinite(startTime) || !Number.isFinite(endDay) || startTime > endDay || endDate.value > today.value) {
+      error.value = '请选择有效的日期范围，结束日期最晚为今天。'
       return
     }
-    if (delay > BINANCE_INTERVAL_MS) queryNotice.value = `按服务端要求等待 ${Math.ceil(delay / 1000)} 秒后继续查询。`
-    return delay
+    error.value = ''
+    rolling = endDate.value === today.value && startTime === endDay - 6 * DAY_MS
+    applyRange({ startTime, endTime: endDay + DAY_MS - 1 })
   }
 
-  function waitForNextRequest(delay: number, signal: AbortSignal) {
-    return new Promise<void>(resolve => {
-      const done = () => {
-        window.clearTimeout(timer)
-        signal.removeEventListener('abort', done)
-        resolve()
-      }
-      const timer = window.setTimeout(done, delay)
-      signal.addEventListener('abort', done, { once: true })
-    })
+  function loadMore(selected = '') {
+    const next = portfolios.value.filter(p => p.cursor && (!selected || p.id === selected))
+    if (loading.value || !next.length) return
+    // Stay on this SQLite snapshot while the user pages through it.
+    pinned.value = true
+    for (const portfolio of next) void read(portfolio, true)
   }
 
-  return {
-    startDate, endDate, today, earliestDate, query, portfolios, portfolioNames, queryNotice,
-    error, monitoring, paging, lastDurationMs, loadingPortfolio, loading,
-    hasMore, failedPortfolios, activity, tradeRecords, search, loadMore,
-    stopQueries, portfolioName,
+  function updateDay() {
+    const day = shanghaiDate(Date.now())
+    if (day === today.value) return
+    today.value = day
+    const start = dayStart(day) - 6 * DAY_MS
+    if (!query.value) {
+      startDate.value = shanghaiDate(start)
+      endDate.value = day
+      return
+    }
+    if (!rolling || pinned.value) return
+    if (startDate.value === shanghaiDate(query.value.startTime) && endDate.value === shanghaiDate(query.value.endTime)) {
+      startDate.value = shanghaiDate(start)
+      endDate.value = day
+    }
+    applyRange({ startTime: start, endTime: dayStart(day) + DAY_MS - 1 })
   }
+
+  function start() {
+    if (visit || !entries.length) return
+    const controller = new AbortController()
+    visit = controller
+    const groups: { id: string; items: PortfolioResult[] }[] = []
+    for (let i = 0; i < portfolios.value.length; i += 100) {
+      groups.push({ id: newViewId(), items: portfolios.value.slice(i, i + 100) })
+    }
+    monitoring.value = true
+    updateDay()
+    if (!query.value) search()
+    else if (!pinned.value) for (const portfolio of portfolios.value) void read(portfolio)
+
+    async function heartbeat() {
+      if (controller.signal.aborted) return
+      updateDay()
+      await Promise.all(groups.map(async group => {
+        try {
+          activeViewIds.add(group.id)
+          const statuses = await observePortfolios(group.id, group.items.map(p => p.id), controller.signal)
+          if (controller.signal.aborted) return
+          const byId = new Map(statuses.map(status => [status.portfolioId, status]))
+          for (const portfolio of group.items) {
+            const status = byId.get(portfolio.id)
+            if (!status) throw Error('服务未能确认组合的监控状态。')
+            portfolio.observation = status
+            if (query.value && !pinned.value && status.lastSuccessAt && status.lastSuccessAt !== portfolio.refreshedAt &&
+              query.value.endTime >= status.startedAt) void read(portfolio)
+          }
+        } catch (cause) {
+          if (controller.signal.aborted) return
+          releaseObservation(group.id)
+          activeViewIds.delete(group.id)
+          group.id = newViewId()
+          for (const portfolio of group.items) {
+            portfolio.observation = { portfolioId: portfolio.id, startedAt: portfolio.observation?.startedAt ?? 0,
+              lastSuccessAt: portfolio.observation?.lastSuccessAt ?? null,
+              lastPositionChangeAt: portfolio.observation?.lastPositionChangeAt, error: errorMessage(cause) }
+          }
+        }
+      }))
+      if (!controller.signal.aborted) timer = window.setTimeout(heartbeat, 8_000)
+    }
+    void heartbeat()
+  }
+
+  function stop() {
+    visit?.abort()
+    visit = undefined
+    window.clearTimeout(timer)
+    cancelReads()
+    for (const id of activeViewIds) releaseObservation(id)
+    activeViewIds.clear()
+    monitoring.value = false
+    for (const portfolio of portfolios.value) portfolio.observation = undefined
+  }
+
+  return { startDate, endDate, today, query, portfolios, error, monitoring, paging, loading,
+    pinned, tradeRecords, updatedAtById, search, loadMore, start, stop, portfolioName }
 }

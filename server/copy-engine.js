@@ -12,6 +12,20 @@ const closeEnough = (a, b, fraction = 1e-10) => Math.abs(a - b) <= Math.max(a, b
 const rounded = value => Number(value.toPrecision(15))
 const describe = error => error instanceof Error ? error.message.slice(0, 250) : '请求失败。'
 
+function initializeFeeds(state) {
+  if (state.feeds) return
+  const ids = state.config.portfolioIds ?? [state.config.portfolioId]
+  state.feeds = Object.fromEntries(ids.map(portfolioId => [portfolioId, {
+    since: state.since, floor: state.feedFloor ?? state.since, seen: [...(state.seen ?? [])],
+    openedAfter: state.openedAfter ?? state.since, catchupSpan: state.catchupSpan,
+    recovering: state.recoveringFeed ?? false, exitBarriers: {},
+  }]))
+  delete state.feedFloor
+  delete state.seen
+  delete state.catchupSpan
+  delete state.recoveringFeed
+}
+
 export async function runCopyTick(state, exchange, save, now = Date.now()) {
   if (running.has(state)) return
   running.add(state)
@@ -29,7 +43,7 @@ async function tick(state, exchange, save, now) {
   const currentTime = () => now + Math.max(0, Date.now() - wallStart)
   const errors = []
   state.openedAfter ??= state.since
-  state.feedFloor ??= state.since
+  initializeFeeds(state)
   state.exitBarriers ??= {}
   state.lastCheck = now
   const checked = new Set()
@@ -60,7 +74,7 @@ async function tick(state, exchange, save, now) {
       const current = currentTime()
       const deadline = /^\d+$/.test(header) ? current + Number(header) * 1000 : Date.parse(header)
       state.retryAt = Number.isSafeInteger(deadline) && deadline > current ? deadline : current + 60_000
-      state.recoveringFeed = true
+      for (const feed of Object.values(state.feeds)) feed.recovering = true
       message += ' 币安限流，将在 ' + Math.ceil((state.retryAt - current) / 1000) + ' 秒后恢复巡检。'
     }
     problem(message)
@@ -91,7 +105,7 @@ async function tick(state, exchange, save, now) {
     let position = owned(pending.symbol)
     if (qty > 0 && pending.kind === 'open') {
       if (!position) {
-        position = { symbol: pending.symbol, direction: pending.direction, signalTime: pending.signalTime }
+        position = { symbol: pending.symbol, portfolioId: pending.portfolioId, direction: pending.direction, signalTime: pending.signalTime }
         state.positions.push(position)
       }
       position.quantity = rounded(pending.baseQuantity + qty)
@@ -119,14 +133,14 @@ async function tick(state, exchange, save, now) {
     invalidatePnl()
     if (qty > 0) return {
       clientOrderId: pending.clientOrderId, orderId: ack.orderId, symbol: pending.symbol, direction: pending.direction,
-      kind: pending.kind, portfolioId: state.config.portfolioId, time: pending.time ?? now, quantity: qty, price,
+      kind: pending.kind, portfolioId: pending.portfolioId, time: pending.time ?? now, quantity: qty, price,
     }
   }
 
-  async function submit(kind, symbol, direction, signalTime) {
+  async function submit(kind, symbol, direction, portfolioId, signalTime) {
     const position = owned(symbol)
     const pending = {
-      kind, symbol, direction, clientOrderId: randomUUID(), baseQuantity: position?.quantity ?? 0,
+      kind, symbol, direction, portfolioId, clientOrderId: randomUUID(), baseQuantity: position?.quantity ?? 0,
       baseEntryPrice: position?.entryPrice ?? 0, baseEntries: position?.entries ?? 0,
       signalTime: position?.signalTime ?? signalTime, time: currentTime(),
     }
@@ -136,7 +150,8 @@ async function tick(state, exchange, save, now) {
     let ack
     try {
       ack = kind === 'open'
-        ? await exchange.open(symbol, direction, state.config.amount, pending.clientOrderId)
+        ? await exchange.open(symbol, direction, state.config.amount, pending.clientOrderId,
+          state.config.leverage ?? undefined, state.config.sizingMode ?? 'notional')
         : await exchange.close(symbol, direction, pending.baseQuantity, pending.clientOrderId)
     } catch (error) {
       if (error?.definite === true) state.pending = null
@@ -173,7 +188,7 @@ async function tick(state, exchange, save, now) {
     } catch (error) {
       account = undefined
       accountFailed = true
-      state.recoveringFeed = true
+      for (const feed of Object.values(state.feeds)) feed.recovering = true
       invalidatePnl()
       exchangeProblem('无法核对账户持仓。', error)
     }
@@ -215,9 +230,9 @@ async function tick(state, exchange, save, now) {
     if (state.pending || state.retryAt || accountFailed || checked.has(position)) return
     checked.add(position)
     if (refresh) await readAccount()
-    if (!account) return
+    if (!account || state.retryAt) return
     if (!matches(position, account.get(position.symbol))) return releasePosition(position)
-    await submit('close', position.symbol, position.direction)
+    await submit('close', position.symbol, position.direction, position.portfolioId)
   }
 
   for (const position of [...state.positions]) {
@@ -237,92 +252,135 @@ async function tick(state, exchange, save, now) {
   }
 
   if (state.retryAt) { persist(); return }
-  const managing = Boolean(state.positions.length || state.pending)
-  const earliest = now - (managing ? historyMs : freshnessMs)
-  if (managing && state.since < earliest) {
-    for (const p of state.positions) p.historyGap = true
-    if (state.pending?.kind === 'open') state.pending.historyGap = true
-  }
-  if (state.positions.some(p => p.historyGap) || state.pending?.historyGap) {
-    problem('中断时间超出可核对的公开成交窗口，部分平仓信号可能缺失。请在币安核对现有仓位。')
-  }
-  const start = Math.max(state.feedFloor, state.since - (state.catchupSpan ? 0 : overlapMs), earliest)
-  const until = managing ? Math.min(now, Math.max(state.since, earliest) + (state.catchupSpan ?? catchupSpanMs)) : now
-  const missed = now - state.since > freshnessMs
-  let signals
-  try {
-    signals = await exchange.signals(state.config.portfolioId, start, until)
-    if (!Array.isArray(signals) || signals.some(s => !s || typeof s.id !== 'string' || !s.id
-      || !Number.isSafeInteger(s.time) || typeof s.symbol !== 'string'
-      || !['open', 'close'].includes(s.kind) || !['LONG', 'SHORT'].includes(s.direction))) {
-      throw Error('带单成交格式无效。')
+  async function readFeed(portfolioId, feed) {
+    const positions = state.positions.filter(p => p.portfolioId === portfolioId)
+    const pending = state.pending?.portfolioId === portfolioId ? state.pending : null
+    const managing = Boolean(positions.length || pending)
+    if (!state.enabled && !managing) return
+    const earliest = now - (managing ? historyMs : freshnessMs)
+    if (managing && feed.since < earliest) {
+      for (const position of positions) position.historyGap = true
+      if (pending?.kind === 'open') pending.historyGap = true
     }
-  } catch (error) {
-    state.recoveringFeed = true
-    if (managing && error?.code === 'INCOMPLETE_COPY_SIGNALS') {
-      state.catchupSpan = Math.max(1000, Math.floor((until - Math.max(state.since, earliest)) / 2))
+    if (positions.some(p => p.historyGap) || pending?.historyGap) {
+      problem('组合 ' + portfolioId + ' 超出可核对的公开成交窗口，部分平仓信号可能缺失。请在币安核对现有仓位。')
     }
-    exchangeProblem(managing ? '尚未核实带单员是否平仓，将继续核对。' : '无法取得带单成交。', error)
-    persist()
-    return
+    const start = Math.max(feed.floor, feed.since - (feed.catchupSpan ? 0 : overlapMs), earliest)
+    const until = managing ? Math.min(now, Math.max(feed.since, earliest) + (feed.catchupSpan ?? catchupSpanMs)) : now
+    try {
+      const signals = await exchange.signals(portfolioId, start, until)
+      if (!Array.isArray(signals) || signals.some(s => !s || typeof s.id !== 'string' || !s.id
+        || !Number.isSafeInteger(s.time) || typeof s.symbol !== 'string'
+        || !['open', 'close'].includes(s.kind) || !['LONG', 'SHORT'].includes(s.direction))) {
+        throw Error('带单成交格式无效。')
+      }
+      if (now - feed.since > freshnessMs || feed.recovering) {
+        if (!accountFailed && state.enabled && until === now) log('组合 ' + portfolioId + ' 巡检恢复，等待新的开仓信号。')
+        feed.openedAfter = Math.max(feed.openedAfter, now)
+        feed.recovering = accountFailed
+      }
+      return { feed, start, until, signals: signals
+        .filter(s => s.time >= start && s.time > feed.floor && s.time <= until && isUsdtSymbol(s.symbol))
+        .map(s => ({ ...s, portfolioId })) }
+    } catch (error) {
+      feed.recovering = true
+      if (managing && error?.code === 'INCOMPLETE_COPY_SIGNALS') {
+        feed.catchupSpan = Math.max(1000, Math.floor((until - Math.max(feed.since, earliest)) / 2))
+      }
+      exchangeProblem('组合 ' + portfolioId + (managing ? ' 尚未核实带单员是否平仓。' : ' 无法取得带单成交。'), error)
+    }
   }
 
-  if (missed || state.recoveringFeed) {
-    if (!accountFailed && state.enabled && until === now) log('巡检中断后恢复，从本次检查起等待新的开仓信号。')
-    state.openedAfter = Math.max(state.openedAfter, now)
-    state.recoveringFeed = accountFailed
-  }
-  const seen = new Set(state.seen)
-  // At an ambiguous millisecond prefer an exit over adding exposure.
-  signals = signals.filter(s => s.time >= start && s.time > state.feedFloor && s.time <= until && isUsdtSymbol(s.symbol))
-    .sort((a, b) => a.time - b.time || Number(a.kind === 'open') - Number(b.kind === 'open'))
-  for (const signal of signals) {
-    if (seen.has(signal.id)) continue
-    seen.add(signal.id)
-    state.seen.push(signal.id)
-    const { symbol, direction, time } = signal
-    const position = owned(symbol)
-    if (signal.kind === 'close') {
-      blockEntriesThrough(symbol, time)
-      if (state.pending?.symbol === symbol && state.pending.kind === 'open' && state.pending.direction === direction
-        && time >= (state.pending.signalTime ?? 0)) {
-        requestExit(state.pending, time, '带单员已平仓')
+  async function applyBatches(batches) {
+    // At an ambiguous millisecond prefer an exit over adding exposure.
+    const signals = batches.flatMap(batch => batch.signals)
+      .sort((a, b) => a.time - b.time || Number(a.kind === 'open') - Number(b.kind === 'open'))
+    const seenByFeed = new Map(batches.map(({ feed }) => [feed, new Set(feed.seen)]))
+    for (const signal of signals) {
+      const { portfolioId, symbol, direction, time } = signal
+      const feed = state.feeds[portfolioId]
+      const seen = seenByFeed.get(feed)
+      if (seen.has(signal.id)) continue
+      seen.add(signal.id)
+      feed.seen.push(signal.id)
+      const position = owned(symbol)
+      if (signal.kind === 'close') {
+        feed.exitBarriers[symbol] = Math.max(feed.exitBarriers[symbol] ?? 0, time)
+        if (state.pending?.portfolioId === portfolioId && state.pending.symbol === symbol
+          && state.pending.kind === 'open' && state.pending.direction === direction
+          && time >= (state.pending.signalTime ?? 0)) {
+          requestExit(state.pending, time, '带单员已平仓')
+        }
+        if (position?.portfolioId === portfolioId && position.direction === direction && time >= (position.signalTime ?? 0)) {
+          requestExit(position, time, '带单员已平仓')
+          await exitIfPossible(position, true)
+        }
+        continue
       }
-      if (position?.direction === direction && time >= (position.signalTime ?? 0)) {
-        requestExit(position, time, '带单员已平仓')
-        await exitIfPossible(position, true)
+      if (time <= Math.max(state.openedAfter, feed.openedAfter, feed.exitBarriers[symbol] ?? 0, state.exitBarriers[symbol] ?? 0)
+        || currentTime() - time > freshnessMs
+        || !state.enabled || state.pending || state.retryAt || accountFailed || position?.exit || position?.historyGap) continue
+      if (position) {
+        if (position.portfolioId !== portfolioId) {
+          log(symbol + ' 已由组合 ' + position.portfolioId + ' 持仓，跳过组合 ' + portfolioId + ' 的开仓。')
+          continue
+        }
+        if (position.direction !== direction || state.config.repeat !== 'fixed' || position.entries >= state.config.maxEntries) continue
+      } else if (state.positions.length >= state.config.maxPositions) {
+        continue
       }
-      continue
+      await readAccount()
+      if (!account || state.retryAt || currentTime() - time > freshnessMs) continue
+      if (position && !matches(position, account.get(symbol))) {
+        releasePosition(position)
+        continue
+      }
+      if (position && state.config.stopLoss > 0 && account.get(symbol).unrealizedPnl <= -state.config.stopLoss) {
+        requestExit(position, currentTime(), '单仓浮亏已达 ' + state.config.stopLoss + ' USDT 止损线')
+        await exitIfPossible(position)
+        continue
+      }
+      if (!position && account.has(symbol)) continue
+      await submit('open', symbol, direction, portfolioId, time)
     }
-    if (time <= Math.max(state.openedAfter, state.exitBarriers[symbol] ?? 0) || currentTime() - time > freshnessMs
-      || !state.enabled || state.pending || state.retryAt || accountFailed || position?.exit || position?.historyGap) continue
-    if (position) {
-      if (position.direction !== direction || state.config.repeat !== 'fixed' || position.entries >= state.config.maxEntries) continue
-    } else if (state.positions.length >= state.config.maxPositions) {
-      continue
+    for (const { feed, start, until } of batches) {
+      feed.since = Math.max(feed.since, until)
+      if (until === now) delete feed.catchupSpan
+      if (feed.seen.length > 512) {
+        feed.floor = until
+        feed.seen = feed.seen.slice(-512)
+      }
+      for (const [symbol, time] of Object.entries(feed.exitBarriers)) {
+        if (time < start) delete feed.exitBarriers[symbol]
+      }
     }
-    await readAccount()
-    if (!account || currentTime() - time > freshnessMs) continue
-    if (position && !matches(position, account.get(symbol))) {
-      releasePosition(position)
-      continue
-    }
-    if (position && state.config.stopLoss > 0 && account.get(symbol).unrealizedPnl <= -state.config.stopLoss) {
-      requestExit(position, currentTime(), '单仓浮亏已达 ' + state.config.stopLoss + ' USDT 止损线')
-      await exitIfPossible(position)
-      continue
-    }
-    if (!position && account.has(symbol)) continue
-    await submit('open', symbol, direction, time)
   }
-  state.since = Math.max(state.since, until)
-  if (until === now) delete state.catchupSpan
-  if (state.seen.length > 512) {
-    state.feedFloor = until
-    state.seen = state.seen.slice(-512)
+
+  // A slow paginated feed must not hold up an exit already returned by another
+  // leader. Merge the available batches by signal time and serialize all effects.
+  const feeds = Object.entries(state.feeds)
+  const reading = new Set()
+  const ready = []
+  let nextFeed = 0
+  while (nextFeed < feeds.length || reading.size || ready.length) {
+    while (!state.retryAt && nextFeed < feeds.length && reading.size < 4) {
+      const [id, feed] = feeds[nextFeed++]
+      const request = readFeed(id, feed).then(batch => {
+        if (batch) ready.push(batch)
+      }).finally(() => reading.delete(request))
+      reading.add(request)
+    }
+    if (!ready.length && reading.size) await Promise.race(reading)
+    if (state.retryAt) {
+      await Promise.all(reading)
+      for (const feed of Object.values(state.feeds)) feed.recovering = true
+      break
+    }
+    if (ready.length) await applyBatches(ready.splice(0))
   }
+  state.since = Math.min(...Object.values(state.feeds).map(feed => feed.since))
   for (const [symbol, time] of Object.entries(state.exitBarriers)) {
-    if (time < start) delete state.exitBarriers[symbol]
+    if (time < now - freshnessMs) delete state.exitBarriers[symbol]
   }
   state.error = errors.join(' ')
   persist()

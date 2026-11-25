@@ -80,12 +80,12 @@ async function harness(t) {
   const file = join(directory, 'orders.sqlite')
   const started = []
   const market = venue()
-  function launch(factory = market.factory, environment = 'testnet', openMarkStream) {
+  function launch(factory = market.factory, environment = 'testnet', openMarkStream, configured = users) {
     const db = createLocalOrderDb(file)
-    const env = { BINANCE_FUTURES_USERS: JSON.stringify(users), BINANCE_FUTURES_ENV: environment, orderStore: db, openMarkStream }
+    const env = { BINANCE_FUTURES_USERS: configured ? JSON.stringify(configured) : undefined, BINANCE_FUTURES_ENV: environment, orderStore: db, openMarkStream }
     const service = createCopyService(env, factory)
     started.push({ db, service })
-    return { db: db.copy, service }
+    return { db: db.copy, accounts: db.accounts, service }
   }
   async function tick(ms = 5000) {
     t.mock.timers.tick(ms)
@@ -103,6 +103,93 @@ async function harness(t) {
 const begin = { action: 'start', environment: 'testnet', config }
 const pause = { action: 'pause', environment: 'testnet' }
 const fillSignal = (time, kind) => ({ time: epoch + time, id: String(time), symbol: 'BTCUSDT', direction: 'LONG', kind })
+
+test('a restarted strategy waits for its UID, ignores missed entries, and resumes with a rotated key', async t => {
+  const { launch, tick, market } = await harness(t)
+  const start = () => launch(market.factory, 'testnet', undefined, null)
+  const original = start()
+  const credential = { uid: '2187', issuer: 'demo', apiKey: 'copy-fixture', apiSecret: 'fixture-secret', markets: ['futures'] }
+  const user = original.accounts.bind('testnet', credential)
+  assert.equal((await json(original.service, 'copy', user.token, begin)).enabled, true)
+  original.accounts.revoke('testnet', user.token)
+  await original.service.close()
+  const recovered = start()
+  market.feed.push(fillSignal(200, 'open'))
+  await tick()
+  await tick()
+  assert.deepEqual(market.orders, [])
+  const login = recovered.accounts.bind('testnet', { ...credential, apiKey: 'replacement', apiSecret: 'new-secret' })
+  assert.equal(login.id, user.id)
+  await tick()
+  assert.deepEqual(market.orders, [])
+  market.feed.push(fillSignal(15_200, 'open'))
+  await tick()
+  await tick()
+  assert.deepEqual(market.orders.map(order => [order.scope, order.kind]), [['testnet/' + user.id, 'open']])
+  assert.equal((await json(recovered.service, 'copy-pnl', login.token)).pendingCount, 0)
+  assert.equal((await recovered.service.fetch(packet('copy', user.token))).status, 401)
+})
+
+test('copy config validates the leader set and leverage, and an equivalent selection can resume a strategy', async t => {
+  const { launch } = await harness(t)
+  const { service } = launch()
+  const plan = { ...config, portfolioId: undefined, portfolioIds: ['101', '202'], leverage: 150 }
+  for (const invalid of [
+    { portfolioIds: [] }, { portfolioIds: ['101', '101'] }, { portfolioIds: ['1X'] }, { portfolioIds: null },
+    { leverage: null }, { leverage: undefined }, { leverage: '3' }, { leverage: 0 }, { leverage: 1.5 },
+    { leverage: Number.MAX_SAFE_INTEGER + 1 }, { sizingMode: 'unknown' },
+    { sizingMode: 'equityPercent', amount: 101 }, { sizingMode: 'equityPercent', amount: 0 },
+    { portfolioIds: undefined, portfolioId: '101', sizingMode: 'margin', leverage: null },
+  ]) {
+    const response = await service.fetch(packet('copy', undefined, { ...begin, config: { ...plan, ...invalid } }))
+    assert.equal(response.status, 400)
+  }
+  plan.sizingMode = 'equityPercent'
+  const active = await json(service, 'copy', undefined, { ...begin, config: plan })
+  assert.deepEqual(active.config.portfolioIds, ['101', '202'])
+  assert.equal(active.config.leverage, 150)
+  assert.equal(active.config.sizingMode, 'equityPercent')
+  assert.equal((await json(service, 'copy', undefined, { ...begin, config: { ...plan, portfolioIds: ['202', '101'] } })).enabled, true)
+  assert.equal((await service.fetch(packet('copy', undefined, { ...begin, config: { ...plan, leverage: 6 } }))).status, 409)
+})
+
+test('old stored in-flight orders retain their sole leader and exchange leverage after recovery', async t => {
+  const { launch, market, tick } = await harness(t)
+  const { service, db } = launch()
+  await json(service, 'copy', undefined, begin)
+  const record = db.read('testnet', 'a')
+  record.state.config = config
+  record.state.pending = { symbol: 'BTCUSDT', direction: 'LONG', kind: 'open', clientOrderId: 'legacy-key',
+    baseQuantity: 0, baseEntries: 0, baseEntryPrice: 0, signalTime: epoch, time: epoch }
+  db.write('testnet', 'a', record.state, record.revision)
+  market.orders.push({ ...record.state.pending, scope: 'testnet/a', orderId: '10101' })
+  market.accounts.set('testnet/a', [{ symbol: 'BTCUSDT', direction: 'LONG', quantity: 1, entryPrice: 50, unrealizedPnl: 4 }])
+  const restored = await json(service, 'copy')
+  assert.deepEqual(restored.config.portfolioIds, ['101'])
+  assert.equal(restored.config.leverage, null)
+  assert.equal(restored.config.sizingMode, 'notional')
+  assert.equal(restored.pending.portfolioId, '101')
+  assert.equal((await json(service, 'copy', undefined, { ...begin, config: restored.config })).enabled, true)
+  await tick()
+  assert.equal((await json(service, 'copy')).positions[0].portfolioId, '101')
+  assert.equal((await json(service, 'copy-pnl')).rows[0].portfolioId, '101')
+  assert.equal(market.orders.length, 1)
+})
+
+test('previously running fixed-notional strategies keep their original sizing and leverage', async t => {
+  const { launch } = await harness(t)
+  const { service, db } = launch()
+  await json(service, 'copy', undefined, begin)
+  const record = db.read('testnet', 'a')
+  record.state.config = { ...config, leverage: 150 }
+  db.write('testnet', 'a', record.state, record.revision)
+  const original = (await json(service, 'copy')).config
+  assert.equal(original.sizingMode, 'notional')
+  assert.equal(original.amount, config.amount)
+  assert.equal(original.leverage, 150)
+  assert.equal((await json(service, 'copy', undefined, { ...begin, config: original })).enabled, true)
+  assert.equal((await service.fetch(packet('copy', undefined, { ...begin, config: { ...original, amount: 99 } }))).status, 409)
+})
 
 test('a streamed loss threshold wakes a leased account check before the next poll, including after pausing openings', async t => {
   const { launch, market, tick } = await harness(t)
@@ -188,6 +275,30 @@ test('pause on a second SQLite connection before the journal write wins and prev
   assert.equal(end.enabled, false)
   assert.equal(end.pending, null)
   assert.equal(market.orders.length, 0)
+})
+
+test('a long multi-leader poll renews its SQLite lease and records progress while another process waits', async t => {
+  const { launch, market, tick } = await harness(t)
+  const held = Promise.withResolvers()
+  const pending = Promise.withResolvers()
+  const { service } = launch((...args) => {
+    const api = market.factory(...args)
+    return { ...api, async signals(id) {
+      if (id === '202') { pending.resolve(); await held.promise }
+      return []
+    } }
+  })
+  const other = launch()
+  await json(service, 'copy', undefined, { ...begin, config: { ...config, portfolioIds: ['101', '202'], leverage: 3 } })
+  await tick()
+  await pending.promise
+  for (let elapsed = 0; elapsed < 120_000; elapsed += 30_000) await tick(30_000)
+  assert.equal(other.db.claim('testnet', 'a', 'competitor', Date.now()), false)
+  held.resolve()
+  await flush()
+  const { state } = other.db.read('testnet', 'a')
+  assert.equal(state.feeds['101'].since, epoch + 5000)
+  assert.equal(state.feeds['202'].since, epoch + 5000)
 })
 
 test('a pause between submission and acknowledgement is preserved; recovery reconciles the submitted order once', async t => {

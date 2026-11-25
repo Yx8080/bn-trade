@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   Coin,
   EditPen,
@@ -10,7 +10,7 @@ import {
   Timer,
 } from '@element-plus/icons-vue'
 import { usePortfolioHistory } from '../usePortfolioHistory'
-import { detailUrl, formatNumber, formatTradeTime, shanghaiDate, tradeValue } from '../trades'
+import { detailUrl, formatNumber, formatTradeAmount, formatTradeTime, shanghaiDate, tradeValue } from '../trades'
 import { reportedPnl, summarizeReportedPnl } from '../pnl'
 import type { LeadPortfolio } from '../portfolios'
 import ClosedPositions from './ClosedPositions.vue'
@@ -21,25 +21,21 @@ const {
   startDate,
   endDate,
   today,
-  earliestDate,
   query,
   portfolios,
-  queryNotice,
   error,
   monitoring,
   paging,
-  lastDurationMs,
-  loadingPortfolio,
   loading,
-  hasMore,
-  failedPortfolios,
-  activity,
+  pinned,
   tradeRecords,
+  updatedAtById,
   search,
   loadMore,
+  start,
+  stop,
   portfolioName: name,
 } = usePortfolioHistory(props.entries)
-if (props.entries.length) search()
 const opened = ref(false)
 watch(
   () => props.visible,
@@ -49,6 +45,26 @@ watch(
   },
   { immediate: true },
 )
+let away = false
+function syncVisibility() {
+  if (props.visible && !document.hidden && !away) start()
+  else stop()
+}
+function leave() { away = true; stop() }
+function returnToPage() { away = false; syncVisibility() }
+watch(() => props.visible, syncVisibility, { flush: 'sync' })
+onMounted(() => {
+  document.addEventListener('visibilitychange', syncVisibility)
+  window.addEventListener('pagehide', leave)
+  window.addEventListener('pageshow', returnToPage)
+  syncVisibility()
+})
+onUnmounted(() => {
+  document.removeEventListener('visibilitychange', syncVisibility)
+  window.removeEventListener('pagehide', leave)
+  window.removeEventListener('pageshow', returnToPage)
+  stop()
+})
 const selected = ref('')
 const rows = computed(() => {
   const filtered = selected.value
@@ -64,28 +80,20 @@ const reported = computed(() => closed.value.filter((row) => row.pnl != null).le
 const visiblePortfolios = computed(() => selected.value
   ? portfolios.value.filter(portfolio => portfolio.id === selected.value)
   : portfolios.value)
-const loaded = computed(() => visiblePortfolios.value.some(portfolio => portfolio.successes))
+const loaded = computed(() => visiblePortfolios.value.some(portfolio => portfolio.loaded))
 const failures = computed(() => visiblePortfolios.value.filter(portfolio => portfolio.error))
+const hasMore = computed(() => visiblePortfolios.value.some(portfolio => portfolio.cursor))
+const observationFailures = computed(() => visiblePortfolios.value.filter(portfolio => portfolio.observation?.error))
+const lastObserved = computed(() => Math.max(0, ...visiblePortfolios.value.map(p => p.observation?.lastSuccessAt ?? 0)))
 const emptyState = computed(() => {
-  if (!query.value) return { title: '尚未查询成交记录', detail: '添加带单组合后，将自动获取公开成交。' }
-  if (failures.value.length) {
-    if (loaded.value) return { title: '已加载的数据中暂无匹配成交', detail: '部分数据未能更新，请查看上方的组合状态。' }
-    return {
-      title: '尚未取得成交数据',
-      detail: monitoring.value ? '监控会自动重试。' : '可点击「查询」重试。',
-    }
-  }
-  if (visiblePortfolios.value.some(portfolio => !portfolio.successes)) {
-    return monitoring.value
-      ? { title: '正在获取成交记录', detail: '等待所选组合返回数据。' }
-      : { title: '成交查询未完成', detail: '点击「查询」可重新获取所选时段的成交。' }
-  }
-  return { title: '暂无匹配的成交记录', detail: visiblePortfolios.value.some(portfolio => portfolio.cursor)
-    ? '已加载的记录中暂无可识别的开平仓成交。'
-    : '所选日期暂无公开开平仓成交。' }
+  if (!props.entries.length) return { title: '尚未添加带单组合', detail: '添加组合后，打开本页即可开始监控。' }
+  if (failures.value.length) return { title: '本地成交记录读取未完成', detail: '点击「查询」重新读取所选时段的本地记录。' }
+  if (!loaded.value && loading.value) return { title: '正在读取本地成交记录', detail: '' }
+  if (hasMore.value) return { title: '当前结果没有可识别的开平仓成交', detail: '可继续加载更早的本地记录。' }
+  return { title: '所选时段暂无已记录的成交', detail: '本地历史只覆盖工作台实际监控到的公开成交。' }
 })
 function signed(value: number) {
-  return (value > 0 ? '+' : '') + formatNumber(value)
+  return (value > 0 ? '+' : '') + formatTradeAmount(value)
 }
 function pnlColor(value: number | null) {
   return value == null || value === 0 ? '' : value > 0 ? 'gain' : 'loss'
@@ -96,7 +104,7 @@ function pnlColor(value: number | null) {
   <header class="page-heading">
     <div>
       <h1>带单监控</h1>
-      <p>查看组合成交记录，追踪已披露的平仓盈亏。</p>
+      <p>查看币安实盘带单员的公开成交与平仓盈亏。</p>
     </div>
     <button class="btn" @click="emit('edit')">
       <EditPen />
@@ -165,9 +173,9 @@ function pnlColor(value: number | null) {
         <div class="title-icon"><FolderOpened /></div>
         <h2>成交明细</h2>
       </div>
-      <span class="status" :class="{ active: monitoring && !failedPortfolios.length }">
+      <span class="status" :class="{ active: monitoring && !observationFailures.length }">
         <i></i>
-        {{ monitoring && failedPortfolios.length ? '监控中 · 查询异常' : monitoring ? '监控中' : entries.length ? '监控已暂停' : '等待添加组合' }}
+        {{ monitoring && observationFailures.length ? '监控连接异常' : monitoring ? '监控中' : entries.length ? '监控已暂停' : '等待添加组合' }}
       </span>
     </div>
     <form class="filters" @submit.prevent="search">
@@ -176,7 +184,6 @@ function pnlColor(value: number | null) {
         <input
           v-model="startDate"
           type="date"
-          :min="earliestDate"
           :max="endDate || today"
           required
         />
@@ -186,7 +193,7 @@ function pnlColor(value: number | null) {
         <input
           v-model="endDate"
           type="date"
-          :min="startDate || earliestDate"
+          :min="startDate || undefined"
           :max="today"
           required
         />
@@ -209,10 +216,11 @@ function pnlColor(value: number | null) {
     </form>
     <p v-if="error" class="notice error" role="alert">{{ error }}</p>
     <p v-for="item in failures" :key="item.id" class="notice warning" role="status">
-      {{ name(item.id) }} · {{ item.error }}
-      <span v-if="item.lastSuccessAt">最近成功更新于 {{ formatTradeTime(item.lastSuccessAt) }}。</span>
+      {{ name(item.id) }} · 本地记录读取失败。{{ item.error }}
     </p>
-    <p v-if="queryNotice" class="notice warning" role="status">{{ queryNotice }}</p>
+    <p v-for="item in observationFailures" :key="'observation:' + item.id" class="notice warning" role="status">
+      {{ name(item.id) }} · {{ item.observation?.error }}
+    </p>
     <div class="table-scroll">
       <table class="trades-table">
         <thead>
@@ -228,7 +236,7 @@ function pnlColor(value: number | null) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="(row, index) in rows" :key="index">
+          <tr v-for="row in rows" :key="row.portfolioId + ':' + row.observedId">
             <td>
               <button
                 v-if="typeof row.symbol === 'string' && row.symbol.endsWith('USDT')"
@@ -260,7 +268,7 @@ function pnlColor(value: number | null) {
               </a>
             </td>
             <td class="numeric">
-              {{ formatNumber(row.avgPrice) }}
+              {{ formatTradeAmount(row.avgPrice) }}
               <small>{{ row.quoteAsset }}</small>
             </td>
             <td class="numeric">
@@ -268,7 +276,7 @@ function pnlColor(value: number | null) {
               <small>{{ row.baseAsset }}</small>
             </td>
             <td class="numeric">
-              {{ formatNumber(tradeValue(row.avgPrice, row.executedQty, row.quoteQuantity)) }}
+              {{ formatTradeAmount(tradeValue(row.avgPrice, row.executedQty, row.quoteQuantity)) }}
               <small>{{ row.quoteAsset }}</small>
             </td>
             <td class="time-cell">{{ formatTradeTime(row.orderUpdateTime) }}</td>
@@ -279,38 +287,33 @@ function pnlColor(value: number | null) {
     <div v-if="!rows.length" class="empty-state">
       <span class="empty-icon"><List /></span>
       <strong>{{ emptyState.title }}</strong>
-      <p>{{ emptyState.detail }}</p>
+      <p v-if="emptyState.detail">{{ emptyState.detail }}</p>
     </div>
     <div class="ledger-footer">
       <span>
         <Timer />
         北京时间 UTC+8
       </span>
-      <span v-if="loadingPortfolio">正在查询 {{ name(loadingPortfolio.id) }}</span>
-      <span
-        v-else-if="activity.requests"
-        :title="activity.lastSuccessAt ? '最近成功 ' + formatTradeTime(activity.lastSuccessAt) : ''"
-      >
-        成功 {{ activity.successes }}/{{ activity.requests }}<template v-if="lastDurationMs != null"> · {{ lastDurationMs }} ms</template>
-      </span>
+      <span v-if="loading">正在读取本地记录</span>
+      <span v-else-if="lastObserved">最近监控 {{ formatTradeTime(lastObserved) }}</span>
       <span v-if="query">
         {{ shanghaiDate(query.startTime) }} 至 {{ shanghaiDate(query.endTime) }}
         <template v-if="loaded"> · 已加载 {{ rows.length }} 笔</template>
       </span>
       <button
-        v-if="hasMore && monitoring"
+        v-if="hasMore"
         class="text-button"
-        :disabled="paging"
-        @click="loadMore"
+        :disabled="loading"
+        @click="loadMore(selected)"
       >
         {{ paging ? '正在加载更早成交…' : '加载更早成交' }}
       </button>
     </div>
   </section>
-  <p v-if="monitoring" class="footnote">
-    按顺序轮询 {{ portfolios.length }} 个组合，两次请求间隔至少 5 秒。
+  <p v-if="entries.length" class="footnote">
+    {{ pinned ? '翻页期间保持当前结果，点击「查询」可刷新本地记录。' : '打开此页时记录新成交。日期查询和翻页读取本地已保存的记录。' }}
   </p>
   <div v-if="opened" class="position-history">
-    <ClosedPositions :entries="entries" @quote="emit('quote', $event)" />
+    <ClosedPositions :entries="entries" :updated-at-by-id="updatedAtById" @quote="emit('quote', $event)" />
   </div>
 </template>

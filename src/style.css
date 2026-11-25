@@ -222,6 +222,7 @@ h2 {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 14px;
   min-height: 69px;
   padding: 0 clamp(20px, 3vw, 48px);
   border-bottom: 1px solid var(--line);
@@ -248,13 +249,17 @@ h2 {
   color: #8b9a91;
 }
 .topbar-tools {
-  gap: 22px;
+  gap: 10px;
 }
 .today {
   gap: 7px;
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  padding-right: 15px;
+  margin-right: 5px;
+  border-right: 1px solid var(--line);
+  line-height: 20px;
 }
 .today svg {
   width: 15px;
@@ -317,11 +322,20 @@ h2 {
   background: #104e3d;
   border-color: #104e3d;
 }
-.btn.small,
-.account-button {
+.btn.small {
   min-height: 34px;
   font-size: 12px;
 }
+.btn.account-button {
+  min-height: 37px;
+  border-color: #23473c;
+  border-radius: 8px;
+  background: #23473c;
+  color: #fff;
+  font-size: 12px;
+}
+.account-button svg { color: #d4e8d8; }
+.btn.account-button:hover { background: #2f5b4a; border-color: #2f5b4a; }
 .icon-button {
   width: 34px;
   height: 34px;
@@ -786,6 +800,10 @@ td small {
   .topbar {
     padding-inline: 14px;
   }
+  .topbar-tools { gap: 7px; }
+  .breadcrumb > span, .breadcrumb > svg { display: none; }
+  .breadcrumb strong { white-space: nowrap; }
+  .btn.account-button { min-height: 40px; padding-inline: 11px; }
   .main-content {
     padding: 20px 12px 28px;
   }
@@ -839,6 +857,10 @@ td small {
   .workspace-dialog {
     padding: 17px;
   }
+}
+@media (max-width: 355px) {
+  .topbar .breadcrumb { display: none; }
+  .topbar-tools { width: 100%; justify-content: space-between; }
 }
 @media (prefers-reduced-motion: reduce) {
   *,

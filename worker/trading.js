@@ -1,3 +1,5 @@
+export { isAppLeverage as isValidLeverage } from '../shared/leverage.js'
+
 export class ApiError extends Error {
   constructor(status, code, message) {
     super(message)
@@ -51,7 +53,7 @@ function configuredUsers(raw) {
     throw new ApiError(503, 'USERS_NOT_CONFIGURED', '服务端尚未配置交易账户。')
   }
   for (const user of users) {
-    if (!user || !hasText(user.id) || !hasText(user.name) || !hasText(user.token) || /\s/.test(user.token)
+    if (!user || !hasText(user.id) || user.id.startsWith('uid:') || !hasText(user.name) || !hasText(user.token) || /\s/.test(user.token)
       || ids.has(user.id) || byToken.has(user.token)) {
       throw new ApiError(503, 'INVALID_USERS', '服务端交易账户配置有误。')
     }
@@ -70,16 +72,45 @@ function configuredUsers(raw) {
   return byToken
 }
 
-export function getTradingUser(request, env) {
-  const token = request.headers.get('Authorization')?.match(/^Bearer ([^\s]+)$/i)?.[1]
-  if (!token) throw new ApiError(401, 'UNAUTHORIZED', '请输入账户访问令牌。')
-  const user = configuredUsers(env.BINANCE_FUTURES_USERS).get(token)
-  if (!user) throw new ApiError(401, 'UNAUTHORIZED', '账户访问令牌无效。')
-  return user
+export function sessionToken(request) {
+  return request.headers.get('Authorization')?.match(/^Bearer ([^\s]+)$/i)?.[1]
+}
+
+export async function getTradingUser(request, env) {
+  const token = sessionToken(request)
+  if (token && /^bs_[A-Za-z0-9_-]{43}$/.test(token)) {
+    const user = env.orderStore?.accounts?.resolveSession(getTradingEnvironment(env), token)
+    if (user) return user
+  }
+  if (token && env.BINANCE_FUTURES_USERS) {
+    const user = configuredUsers(env.BINANCE_FUTURES_USERS).get(token)
+    if (user) return env.verifyConfiguredUser ? env.verifyConfiguredUser(user, request) : user
+  }
+  throw new ApiError(401, 'UNAUTHORIZED', '请重新连接币安账户。')
 }
 
 export function getTradingUserById(env, id) {
-  return [...configuredUsers(env.BINANCE_FUTURES_USERS).values()].find(user => user.id === id)
+  if (env.verifyConfiguredUser) return env.orderStore.accounts.getUserById(getTradingEnvironment(env), id)
+  const legacy = env.BINANCE_FUTURES_USERS
+    ? [...configuredUsers(env.BINANCE_FUTURES_USERS).values()].find(user => user.id === id) : undefined
+  return env.orderStore?.accounts?.getUserById(getTradingEnvironment(env), id, legacy) ?? legacy
+}
+
+// A legacy workspace can use separate keys for spot and futures. Only its
+// matching market may be carried into a session authenticated by one key.
+export function legacyBinding(env, apiKey, apiSecret) {
+  if (!env.BINANCE_FUTURES_USERS) return null
+  for (const user of configuredUsers(env.BINANCE_FUTURES_USERS).values()) {
+    if (apiKey !== user.apiKey && apiKey !== user.spotApiKey) continue
+    const markets = []
+    if (apiKey === user.apiKey && apiSecret === user.apiSecret) markets.push('futures')
+    if (apiKey === user.spotApiKey && apiSecret === user.spotApiSecret) markets.push('spot')
+    // A market without a preconfigured key can be added by the same owner.
+    if (markets.length && !user.spotApiKey) markets.push('spot')
+    if (markets.length && !user.apiKey) markets.push('futures')
+    return { id: user.id, name: user.name, markets }
+  }
+  return null
 }
 
 export const isUsdtSymbol = value =>
@@ -145,6 +176,8 @@ export function orderResult(data, symbol, clientOrderId, submitted) {
   }
 }
 
+const exchangeTimeoutMs = 12_000
+
 export async function binanceRequest(env, base, path, { method = 'GET', params = {}, credentials, order = false } = {}) {
   const url = new URL(path, base)
   const fields = new URLSearchParams(params)
@@ -163,12 +196,13 @@ export async function binanceRequest(env, base, path, { method = 'GET', params =
     const fetchBinance = env.fetchBinance ?? fetch
     response = await fetchBinance(url, {
       method, headers, body: method === 'GET' ? undefined : fields.toString(),
-      signal: AbortSignal.timeout(12_000), redirect: 'manual', cache: 'no-store',
+      signal: AbortSignal.timeout(exchangeTimeoutMs), redirect: 'manual', cache: 'no-store',
     })
-    // Exchange order IDs are 64-bit integers. Preserve the original digits before JSON number conversion.
+    // Exchange identifiers can exceed Number.MAX_SAFE_INTEGER.
     const text = await response.text()
     try {
-      payload = JSON.parse(text.replace(/("orderId"\s*:\s*)(\d+)(?=\s*[,}])/g, '$1"$2"'))
+      payload = JSON.parse(text, (key, value, context) =>
+        (key === 'orderId' || key === 'id' || key === 'uid') && typeof value === 'number' ? context.source : value)
     } catch { /* Non-JSON gateway responses retain their HTTP status below. */ }
   } catch {
     if (order) throw unknownOrder()
@@ -196,15 +230,73 @@ export async function binanceRequest(env, base, path, { method = 'GET', params =
   return payload
 }
 
-export function reserveOrder(env, environment, market, userId, clientOrderId) {
+export function reserveOrder(env, environment, market, userId, clientOrderId, intent) {
   let reserved
   try {
-    reserved = env.orderStore?.reserve(environment, market, userId, clientOrderId)
+    reserved = env.orderStore?.reserve(environment, market, userId, clientOrderId, intent)
   } catch {
     throw new ApiError(503, 'ORDER_DB_UNAVAILABLE', '订单防重数据库暂不可用。')
   }
   if (reserved === undefined) throw new ApiError(503, 'ORDER_DB_NOT_CONFIGURED', '服务端尚未配置订单防重数据库。')
   if (!reserved) {
     throw new ApiError(409, 'ORDER_UNKNOWN', '此客户订单号已提交过，请查询原订单。')
+  }
+}
+
+// Binance sets leverage for the whole account's symbol. Two requests must not
+// change that setting between another request's acknowledgement and order.
+const sendingFuturesOrders = new Set()
+
+export async function setFuturesLeverage(env, base, user, symbol, leverage) {
+  try {
+    const result = await binanceRequest(env, base, '/fapi/v1/leverage', {
+      method: 'POST', credentials: user, params: { symbol, leverage },
+    })
+    if (result.symbol !== symbol || result.leverage !== leverage) throw invalidData()
+  } catch (cause) {
+    const error = new ApiError(cause.status ?? 502, 'LEVERAGE_NOT_CONFIRMED',
+      '未能确认 ' + symbol + ' 的 ' + leverage + ' 倍杠杆，订单未提交。' + (cause instanceof ApiError ? cause.message : ''))
+    error.headers = cause.headers
+    error.definite = true
+    throw error
+  }
+}
+
+export async function submitFuturesOrder(env, base, user, params, leverage, checkExposure) {
+  const identity = [getTradingEnvironment(env), user.id, params.symbol]
+  const owner = params.newClientOrderId
+  const key = JSON.stringify(identity)
+  const busy = () => {
+    const error = new ApiError(409, 'FUTURES_SYMBOL_BUSY', params.symbol + ' 正在处理另一笔订单，请稍后重试。')
+    error.definite = true
+    return error
+  }
+  if (sendingFuturesOrders.has(key)) throw busy()
+  const now = Date.now()
+  const expiresAt = now + 60_000
+  const store = env.orderStore
+  let acquired
+  try {
+    acquired = store.claimFuturesSymbol?.(...identity, owner, expiresAt, now) ?? true
+  } catch {
+    const error = new ApiError(503, 'ORDER_DB_UNAVAILABLE', '订单防重数据库暂不可用。')
+    error.definite = true
+    throw error
+  }
+  if (!acquired) throw busy()
+  sendingFuturesOrders.add(key)
+  try {
+    if (checkExposure) {
+      try { await checkExposure() } catch (error) { error.definite = true; throw error }
+      if (Date.now() + 2 * exchangeTimeoutMs >= expiresAt) throw busy()
+    }
+    if (leverage !== undefined) await setFuturesLeverage(env, base, user, params.symbol, leverage)
+    // A suspended process must not send its order after another owner can
+    // acquire the symbol. Leave time for the entire exchange request.
+    if (Date.now() + exchangeTimeoutMs >= expiresAt) throw busy()
+    return await binanceRequest(env, base, '/fapi/v1/order', { method: 'POST', params, credentials: user, order: true })
+  } finally {
+    sendingFuturesOrders.delete(key)
+    try { store.releaseFuturesSymbol?.(...identity, owner) } catch { /* The lease expires independently of the order result. */ }
   }
 }

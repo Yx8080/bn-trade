@@ -26,12 +26,18 @@ function normalize(value: unknown[]) {
   return entries
 }
 
-export function loadWatchlist(userId: string): LeadPortfolio[] {
+export function loadWatchlist(userId: string, previousLiveId?: string): LeadPortfolio[] {
   try {
-    const saved = localStorage.getItem(storageKey(userId))
+    const current = localStorage.getItem(storageKey(userId))
+    const canRestore = userId.startsWith('live:owner:') && previousLiveId && /^bound-[a-f0-9]{64}$/.test(previousLiveId)
+    const saved = current ?? (canRestore ? localStorage.getItem(storageKey('live:user:' + previousLiveId)) : null)
     if (saved !== null) {
       const entries: unknown = JSON.parse(saved)
-      if (Array.isArray(entries)) return normalize(entries)
+      if (Array.isArray(entries)) {
+        const normalized = normalize(entries)
+        if (current === null) saveWatchlist(userId, normalized)
+        return normalized
+      }
     }
   } catch {
     // Browsers can deny storage access, including when a saved preference is read.

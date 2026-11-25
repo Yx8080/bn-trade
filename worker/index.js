@@ -7,7 +7,7 @@ function isPortfolioId(value) {
   return typeof value === 'string' && /^\d+$/.test(value)
 }
 
-async function fetchPortfolio(env, url, body) {
+async function fetchPortfolio(env, url, body, signal) {
   const headers = new Headers({ Accept: 'application/json', clienttype: 'web' })
   if (body != null) headers.set('Content-Type', 'application/json')
 
@@ -22,7 +22,7 @@ async function fetchPortfolio(env, url, body) {
       body,
       headers,
       redirect: 'manual',
-      signal: AbortSignal.timeout(12_000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(12_000)]) : AbortSignal.timeout(12_000),
     })
     const retryAfter = upstream.headers.get('Retry-After')
     if (retryAfter) responseHeaders.set('Retry-After', retryAfter)
@@ -73,7 +73,7 @@ export default {
       const { portfolioId, pageNumber, pageSize } = await request.json().catch(() => null) ?? {}
       if (!isPortfolioId(portfolioId) || !Number.isSafeInteger(pageNumber) || pageNumber < 1
         || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 50) return new Response(null, { status: 400 })
-      return fetchPortfolio(env, new URL('position-history', binancePortfolioUrl), JSON.stringify({ portfolioId, pageNumber, pageSize }))
+      return fetchPortfolio(env, new URL('position-history', binancePortfolioUrl), JSON.stringify({ portfolioId, pageNumber, pageSize }), request.signal)
     }
 
     if (pathname === '/api/binance/latest-records') {

@@ -357,3 +357,49 @@ test('an observed close suppresses a delayed older open and an ambiguous same-mi
   await f.tick(400)
   assert.equal(f.orders.length, 1)
 })
+
+test('selected leaders share the position cap and only the owning leader can add, exit or claim the execution', async () => {
+  const other = '22'
+  const f = fixture({ portfolioIds: [id, other], leverage: 10, sizingMode: 'equityPercent', amount: 2 })
+  const trades = { [id]: [signal(1), signal(3, eth, 'close'), signal(4, sol), signal(6)],
+    [other]: [signal(2, eth, 'open', 'LONG', '1'), signal(2, btc), signal(3, btc, 'close')] }
+  const queried = new Set()
+  f.exchange.signals = async portfolioId => {
+    queried.add(portfolioId)
+    return trades[portfolioId]
+  }
+  const open = f.exchange.open
+  f.exchange.open = async (...args) => {
+    assert.equal(args[2], 2)
+    assert.equal(args[4], 10)
+    assert.equal(args[5], 'equityPercent')
+    return open(...args)
+  }
+  const ledger = []
+  const save = (snapshot, fill) => { f.save(snapshot); if (fill) ledger.push([fill.kind, fill.portfolioId, fill.symbol]) }
+  await runCopyTick(f.state, f.exchange, save, start + 100)
+  assert.deepEqual(queried, new Set([id, other]))
+  assert.deepEqual(ledger, [['open', id, btc], ['open', other, eth], ['open', id, btc]])
+  assert.deepEqual(f.state.positions.map(p => [p.portfolioId, p.quantity]), [[id, 2], [other, 1]])
+  // Even a failed leader feed must leave the other leader's exit actionable.
+  const slow = Promise.withResolvers()
+  f.exchange.signals = async portfolioId => {
+    if (portfolioId === id) return slow.promise
+    return [...trades[other], signal(150, eth, 'close')]
+  }
+  const polling = runCopyTick(f.state, f.exchange, save, start + 200)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(ledger.at(-1), ['close', other, eth])
+  slow.reject(Error('offline'))
+  await polling
+  assert.match(f.state.error, /offline/)
+  assert.equal(f.state.feeds[id].since, start + 100)
+  assert.equal(f.state.feeds[other].since, start + 200)
+  assert.deepEqual(ledger.at(-1), ['close', other, eth])
+  assert.deepEqual(f.state.positions.map(p => p.portfolioId), [id])
+  // Upon recovery the owner still receives its exit, and the healthy source can
+  // open using the same raw fill identifier the other source already processed.
+  f.exchange.signals = async portfolioId => portfolioId === id ? [signal(170, btc, 'close')] : [signal(220, eth, 'open', 'LONG', '6')]
+  await runCopyTick(f.state, f.exchange, save, start + 300)
+  assert.deepEqual(ledger.slice(-2), [['close', id, btc], ['open', other, eth]])
+})

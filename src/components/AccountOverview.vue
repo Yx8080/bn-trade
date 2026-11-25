@@ -1,56 +1,20 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref } from 'vue'
 import { Lock, Refresh, Wallet } from '@element-plus/icons-vue'
-import { getAccount, getSpotAccount, type FuturesAccount, type FuturesSession } from '../futures'
+import type { getSpotAccount, FuturesAccount, FuturesSession } from '../futures'
 import { formatNumber, formatTradeTime } from '../trades'
 
 const props = defineProps<{
   market: 'spot' | 'futures'
   session: FuturesSession | null
-  token: string
-  revision: number
+  account?: FuturesAccount
+  spotAccount?: Awaited<ReturnType<typeof getSpotAccount>>
+  loading: boolean
+  error: string
+  fetchedAt: number
 }>()
-const emit = defineEmits<{ connect: [] }>()
+const emit = defineEmits<{ connect: []; refresh: [] }>()
 const tab = ref<'positions' | 'balances'>(props.market === 'futures' ? 'positions' : 'balances')
-const account = ref<FuturesAccount>()
-const spotAccount = ref<Awaited<ReturnType<typeof getSpotAccount>>>()
-const retry = ref(0)
-const error = ref('')
-const loading = ref(false)
-const fetchedAt = ref(0)
-watch(
-  () => [props.token, props.revision, retry.value],
-  (_, __, cleanUp) => {
-    const controller = new AbortController()
-    cleanUp(() => controller.abort())
-    error.value = ''
-    if (!props.session) return
-    async function load() {
-      loading.value = true
-      try {
-        if (props.market === 'futures') {
-          const result = await getAccount(props.token, controller.signal)
-          if (!controller.signal.aborted) account.value = result
-        } else {
-          const result = await getSpotAccount(props.token, controller.signal)
-          if (!controller.signal.aborted) spotAccount.value = result
-        }
-        if (!controller.signal.aborted) fetchedAt.value = Date.now()
-      } catch (cause) {
-        if (!controller.signal.aborted) {
-          error.value = cause instanceof Error ? cause.message : '账户查询失败。'
-          account.value = undefined
-          spotAccount.value = undefined
-          fetchedAt.value = 0
-        }
-      } finally {
-        if (!controller.signal.aborted) loading.value = false
-      }
-    }
-    void load()
-  },
-  { immediate: true },
-)
 </script>
 
 <template>
@@ -60,7 +24,7 @@ watch(
         <div class="title-icon"><Wallet /></div>
         <h2>{{ market === 'futures' ? '合约账户' : '现货账户' }}</h2>
       </div>
-      <button v-if="session" class="btn small" :disabled="loading" @click="retry++">
+      <button v-if="session" class="btn small" :disabled="loading" @click="emit('refresh')">
         <Refresh />
         {{ loading ? '更新中…' : '刷新账户' }}
       </button>
@@ -72,10 +36,10 @@ watch(
     </div>
     <template v-else>
       <div v-if="market === 'futures'" class="account-tabs">
-        <button :class="{ active: tab === 'positions' }" @click="tab = 'positions'">
+        <button :class="{ active: tab === 'positions' }" :aria-pressed="tab === 'positions'" @click="tab = 'positions'">
           当前持仓
         </button>
-        <button :class="{ active: tab === 'balances' }" @click="tab = 'balances'">账户余额</button>
+        <button :class="{ active: tab === 'balances' }" :aria-pressed="tab === 'balances'" @click="tab = 'balances'">账户余额</button>
       </div>
       <p v-if="error" class="notice error" role="alert">{{ error }}</p>
       <div v-else-if="tab === 'positions'" class="table-scroll">

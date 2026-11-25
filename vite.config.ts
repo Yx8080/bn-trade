@@ -16,6 +16,6 @@ function localApi(server: ViteDevServer | PreviewServer) {
 export default defineConfig({
   plugins: [vue(), { name: 'trade-api', configureServer: localApi, configurePreviewServer: localApi }],
   server: {
-    fs: { deny: ['.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/.trade-data/**'] },
+    fs: { deny: ['.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/.trade-data/**', '**/*.vault-key', '**/*.vault-key.*'] },
   },
 })

@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
-import { createHmac } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
+import { unlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { handleFutures } from './futures.js'
 import { createLocalOrderDb } from './local-orders.js'
@@ -93,21 +96,142 @@ test('signed limit orders retain exact decimals and 64-bit IDs, including concur
   const env = { ...config, orderStore: db }
   const upstream = t.mock.method(globalThis, 'fetch', (url, init) => {
     assert.equal(url.origin, 'https://demo-fapi.binance.com')
-    assert.equal(url.pathname, '/fapi/v1/order')
     const params = verifySignature(url, init, users[0])
     assert.equal(init.method, 'POST')
+    if (url.pathname === '/fapi/v1/leverage') {
+      assert.equal(params.get('symbol'), order.symbol)
+      assert.equal(params.get('leverage'), '150')
+      return Response.json({ symbol: order.symbol, leverage: 150 })
+    }
+    assert.equal(url.pathname, '/fapi/v1/order')
+    assert.equal(params.has('leverage'), false)
     assert.equal(params.get('price'), '60001.50')
     assert.equal(params.get('quantity'), '0.002')
     assert.equal(params.get('timeInForce'), 'GTC')
     assert.equal(params.get('newClientOrderId'), 'intent-1')
     return new Response('{"symbol":"BTCUSDT","clientOrderId":"intent-1","orderId":90071992547409935,"status":"NEW","type":"LIMIT","side":"BUY","executedQty":"0","avgPrice":"0"}')
   })
-  const pair = await Promise.all([send('orders', users[0], order, env), send('orders', users[0], order, env)])
+  const leveraged = { ...order, leverage: 150 }
+  const pair = await Promise.all([send('orders', users[0], leveraged, env), send('orders', users[0], leveraged, env)])
   const accepted = pair.find(response => response.status === 201)
   const duplicate = pair.find(response => response.status === 409)
   assert.equal((await accepted.json()).orderId, '90071992547409935')
   assert.equal((await duplicate.json()).code, 'ORDER_UNKNOWN')
-  assert.equal(upstream.mock.callCount(), 1)
+  assert.deepEqual(upstream.mock.calls.map(call => call.arguments[0].pathname), ['/fapi/v1/leverage', '/fapi/v1/order'])
+})
+
+test('looks up the leverage bracket for the account’s absolute hedge exposure on just the selected symbol', async t => {
+  let gross = 600
+  let positionAvailable = true
+  const upstream = t.mock.method(globalThis, 'fetch', (url, init) => {
+    assert.equal(init.method, 'GET')
+    assert.equal(verifySignature(url, init, users[1]).get('symbol'), 'ETHUSDT')
+    if (url.pathname === '/fapi/v1/symbolConfig') return Response.json(positionAvailable ? [{ symbol: 'ETHUSDT', leverage: 7 }] : [])
+    if (url.pathname === '/fapi/v3/positionRisk') {
+      if (!positionAvailable) return new Response(null, { status: 503 })
+      return Response.json([{ symbol: 'ETHUSDT', notional: String(gross) }, { symbol: 'ETHUSDT', notional: String(-gross) }])
+    }
+    assert.equal(url.pathname, '/fapi/v1/leverageBracket')
+    const account = { symbol: 'ETHUSDT', brackets: [
+      { bracket: 1, initialLeverage: 150, notionalFloor: 0, notionalCap: 1000 },
+      { bracket: 2, initialLeverage: 50, notionalFloor: 1000, notionalCap: 50_000 },
+    ] }
+    return Response.json(gross ? [account] : account)
+  })
+  assert.equal((await send('leverage?symbol=ETHUSDT', null)).status, 401)
+  assert.deepEqual(await (await send('leverage?symbol=ETHUSDT', users[1])).json(),
+    { symbol: 'ETHUSDT', environment: 'testnet', leverage: 7, symbolMaxLeverage: 150, maxLeverage: 50,
+      exposure: '1200', brackets: [{ cap: '1000', leverage: 150 }, { cap: '50000', leverage: 50 }] })
+  gross = 0
+  assert.equal((await (await send('leverage?symbol=ETHUSDT', users[1])).json()).maxLeverage, 150)
+  positionAvailable = false
+  const partial = await (await send('leverage?symbol=ETHUSDT', users[1])).json()
+  assert.deepEqual([partial.symbolMaxLeverage, partial.maxLeverage, partial.leverage, partial.exposure], [150, null, null, null])
+  assert.equal(upstream.mock.callCount(), 9)
+})
+
+test('unconfirmed leverage never sends an order, including when a gateway times out', async t => {
+  const db = createLocalOrderDb(':memory:')
+  t.after(() => db.close())
+  const responses = [
+    Response.json({ symbol: 'ETHUSDT', leverage: 10 }),
+    Response.json({ symbol: order.symbol, leverage: 5 }),
+    Response.json({ code: -4028, msg: 'Invalid leverage' }, { status: 400 }),
+    new Response(null, { status: 504 }),
+  ]
+  const calls = []
+  const env = { ...config, orderStore: db, fetchBinance: url => {
+    calls.push(url.pathname)
+    return responses.shift()
+  } }
+  for (let i = 0; i < 4; i++) {
+    const rejected = await send('orders', users[0], { ...order, leverage: 10, clientOrderId: 'unconfirmed-' + i }, env)
+    assert.equal((await rejected.json()).code, 'LEVERAGE_NOT_CONFIRMED')
+  }
+  assert.deepEqual(calls, Array(4).fill('/fapi/v1/leverage'))
+})
+
+test('concurrent orders on the same symbol cannot replace the first order’s chosen leverage', async t => {
+  const db = createLocalOrderDb(':memory:')
+  t.after(() => db.close())
+  const entered = Promise.withResolvers()
+  const release = Promise.withResolvers()
+  const calls = []
+  const env = { ...config, orderStore: db, fetchBinance: async (url, init) => {
+    calls.push(url.pathname)
+    const params = new URLSearchParams(init.body)
+    if (url.pathname === '/fapi/v1/leverage') {
+      entered.resolve()
+      await release.promise
+      return Response.json({ symbol: order.symbol, leverage: Number(params.get('leverage')) })
+    }
+    return Response.json({ symbol: order.symbol, clientOrderId: params.get('newClientOrderId'),
+      orderId: 7, status: 'NEW', type: 'LIMIT', side: 'BUY', executedQty: '0', avgPrice: '0' })
+  } }
+  const first = send('orders', users[0], { ...order, leverage: 7 }, env)
+  await entered.promise
+  try {
+    const conflict = await send('orders', users[0], { ...order, clientOrderId: 'other-id', leverage: 3 }, env)
+    assert.equal((await conflict.json()).code, 'FUTURES_SYMBOL_BUSY')
+    assert.deepEqual(calls, ['/fapi/v1/leverage'])
+  } finally {
+    release.resolve()
+  }
+  assert.equal((await first).status, 201)
+  assert.deepEqual(calls, ['/fapi/v1/leverage', '/fapi/v1/order'])
+})
+
+test('independent service connections honor the symbol lease and only its current owner can release it', async t => {
+  const file = join(tmpdir(), 'bn-leverage-' + randomUUID() + '.sqlite')
+  const first = createLocalOrderDb(file)
+  const second = createLocalOrderDb(file)
+  t.after(() => { first.close(); second.close(); unlinkSync(file) })
+  const identity = ['testnet', users[0].id, order.symbol]
+  const now = Date.now()
+  assert.equal(first.claimFuturesSymbol(...identity, 'owner-1', now + 60_000, now), true)
+  const env = { ...config, orderStore: second, fetchBinance: () => assert.fail('unexpected upstream request') }
+  const conflict = await send('orders', users[0], { ...order, leverage: 7 }, env)
+  assert.equal((await conflict.json()).code, 'FUTURES_SYMBOL_BUSY')
+  assert.equal(second.claimFuturesSymbol(...identity, 'owner-2', now + 120_000, now + 60_000), true)
+  first.releaseFuturesSymbol(...identity, 'owner-1')
+  assert.equal(first.claimFuturesSymbol(...identity, 'owner-3', now + 120_000, now + 61_000), false)
+  second.releaseFuturesSymbol(...identity, 'owner-2')
+  assert.equal(first.claimFuturesSymbol(...identity, 'owner-3', now + 120_000, now + 61_000), true)
+})
+
+test('a process resuming after its symbol lease expires cannot continue from leverage change to order', async t => {
+  const db = createLocalOrderDb(':memory:')
+  t.after(() => db.close())
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const calls = []
+  const env = { ...config, orderStore: db, fetchBinance: url => {
+    calls.push(url.pathname)
+    t.mock.timers.tick(61_000)
+    return Response.json({ symbol: order.symbol, leverage: 7 })
+  } }
+  const expired = await send('orders', users[0], { ...order, leverage: 7 }, env)
+  assert.equal((await expired.json()).code, 'FUTURES_SYMBOL_BUSY')
+  assert.deepEqual(calls, ['/fapi/v1/leverage'])
 })
 
 test('uncertain orders can be queried by their original customer ID without another submit', async t => {
@@ -139,7 +263,9 @@ test('uncertain orders can be queried by their original customer ID without anot
 test('invalid or unconfigured orders do not reach Binance', async t => {
   const upstream = t.mock.method(globalThis, 'fetch', () => assert.fail('unexpected upstream request'))
   assert.equal((await send('orders', users[0], order)).status, 503)
-  for (const edits of [{ quantity: '1e3' }, { reduceOnly: true, positionSide: 'SHORT' }, { price: '0' }, { userId: 'bob' }]) {
+  for (const edits of [{ quantity: '1e3' }, { reduceOnly: true, positionSide: 'SHORT' }, { price: '0' }, { userId: 'bob' },
+    { leverage: 0 }, { leverage: 1.5 }, { leverage: '5' }, { leverage: Number.MAX_SAFE_INTEGER + 1 }, { leverage: 5, reduceOnly: true },
+    { leverage: 5, side: 'SELL', positionSide: 'LONG' }, { leverage: 5, side: 'BUY', positionSide: 'SHORT' }]) {
     assert.equal((await send('orders', users[0], { ...order, ...edits })).status, 400)
   }
   assert.equal((await send('orders', users[0], { ...order, environment: 'live' })).status, 409)

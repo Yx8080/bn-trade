@@ -1,77 +1,17 @@
 import { createHash } from 'node:crypto'
 import timers from 'node:timers/promises'
 import worker from '../worker/index.js'
+import { fundedOpeningNotional } from '../worker/futures-equity.js'
+import { checkCopyLeverage } from '../worker/futures-leverage.js'
+import { decimal, scale, sizeMarketOrder, symbolRules, units } from '../worker/futures-sizing.js'
 import {
   ApiError, binanceRequest, getTradingEnvironment, invalidData, isClientOrderId, isDecimal,
-  isPositiveDecimal, isUsdtSymbol, orderResult, requireSymbol, reserveOrder,
+  isPositiveDecimal, isUsdtSymbol, orderResult, requireSymbol, reserveOrder, submitFuturesOrder,
 } from '../worker/trading.js'
 
 const futuresBases = { live: 'https://fapi.binance.com', testnet: 'https://demo-fapi.binance.com' }
-const marketInfo = new WeakMap()
 const confirmedModes = new WeakMap()
-const scale = 10n ** 18n
 const maxSignalPages = 4
-
-// Fixed-point arithmetic avoids rounding a market order up to the next lot.
-function units(value) {
-  const parts = String(value).match(/^(\d{1,20})(?:\.(\d{1,18}))?(?:e([+-]?\d{1,2}))?$/i)
-  if (!parts) throw invalidData()
-  const fraction = parts[2] ?? ''
-  const shift = 18 + Number(parts[3] ?? 0) - fraction.length
-  const digits = BigInt(parts[1] + fraction)
-  return shift < 0 ? digits / 10n ** BigInt(-shift) : digits * 10n ** BigInt(shift)
-}
-
-function decimal(value) {
-  const digits = value.toString().padStart(19, '0')
-  const fraction = digits.slice(-18).replace(/0+$/, '')
-  return digits.slice(0, -18) + (fraction ? '.' + fraction : '')
-}
-
-function commonStep(first, second) {
-  if (!first || !second) return first || second
-  let a = first
-  let b = second
-  while (b) [a, b] = [b, a % b]
-  return first / a * second
-}
-
-async function symbolRules(env, base, symbol) {
-  let cached = marketInfo.get(env)
-  if (!cached || cached.base !== base || Date.now() >= cached.expiresAt) {
-    const info = binanceRequest(env, base, '/fapi/v1/exchangeInfo').then(data => {
-      if (!Array.isArray(data.symbols)) throw invalidData()
-      return new Map(data.symbols.map(market => [market.symbol, market]))
-    })
-    cached = { base, info, expiresAt: Date.now() + 60_000 }
-    marketInfo.set(env, cached)
-    info.catch(() => { if (marketInfo.get(env) === cached) marketInfo.delete(env) })
-  }
-  const market = (await cached.info).get(symbol)
-  if (!market || market.status !== 'TRADING' || market.quoteAsset !== 'USDT' || !market.orderTypes?.includes('MARKET')) {
-    throw new ApiError(409, 'COPY_MARKET_UNAVAILABLE', '该 USDT 合约当前无法使用市价单。')
-  }
-  if (!Array.isArray(market.filters)) throw invalidData()
-  const filters = new Map(market.filters.map(filter => [filter.filterType, filter]))
-  const lot = filters.get('LOT_SIZE')
-  const marketLot = filters.get('MARKET_LOT_SIZE')
-  if (!lot || !marketLot) throw invalidData()
-  const step = commonStep(units(lot.stepSize), units(marketLot.stepSize))
-  if (!step) throw invalidData()
-  return { step, lots: [lot, marketLot], minNotional: units(filters.get('MIN_NOTIONAL')?.notional) }
-}
-
-function sizeMarketOrder(requested, rules) {
-  const qty = requested / rules.step * rules.step
-  for (const filter of rules.lots) {
-    const min = units(filter.minQty)
-    const max = units(filter.maxQty)
-    if (!qty || qty < min || (max && qty > max)) {
-      throw new ApiError(400, 'COPY_LOT_SIZE', '跟单数量不在该合约允许的市价单数量范围内。')
-    }
-  }
-  return qty
-}
 
 function normalizeSignal(portfolioId, row, since, until) {
   if (!row || !Number.isSafeInteger(row.orderUpdateTime) || !Number.isSafeInteger(row.orderTime)) throw invalidData()
@@ -184,8 +124,9 @@ export function createCopyExchange(env, user, environment) {
     })
   }
 
-  async function submit(symbol, direction, amount, clientOrderId, closing) {
+  async function submit(symbol, direction, amount, clientOrderId, closing, leverage, sizingMode) {
     let params
+    let checkExposure
     try {
       requireSymbol(symbol)
       if (!['LONG', 'SHORT'].includes(direction) || !isClientOrderId(clientOrderId)
@@ -198,14 +139,19 @@ export function createCopyExchange(env, user, environment) {
         quantity = sizeMarketOrder(units(amount), rules)
       } else {
         const options = { params: { symbol } }
-        const [ticker, mark] = await Promise.all([
+        const [ticker, mark, { notional }] = await Promise.all([
           binanceRequest(env, base, '/fapi/v2/ticker/price', options),
           binanceRequest(env, base, '/fapi/v1/premiumIndex', options),
+          fundedOpeningNotional(env, base, user, sizingMode, amount, leverage),
         ])
         if (ticker.symbol !== symbol || mark.symbol !== symbol || !isPositiveDecimal(ticker.price) || !isPositiveDecimal(mark.markPrice)) throw invalidData()
-        quantity = sizeMarketOrder(units(amount) * scale / units(ticker.price), rules)
+        quantity = sizeMarketOrder(notional * scale / units(ticker.price), rules)
         if (quantity * units(mark.markPrice) < rules.minNotional * scale) {
           throw new ApiError(400, 'COPY_MIN_NOTIONAL', '跟单金额低于该合约的最低市价单名义价值。')
+        }
+        if (leverage !== undefined) {
+          const orderNotional = (quantity * units(mark.markPrice) + scale - 1n) / scale
+          checkExposure = () => checkCopyLeverage(env, base, user, symbol, leverage, orderNotional)
         }
       }
       const side = (direction === 'LONG') !== closing ? 'BUY' : 'SELL'
@@ -219,7 +165,7 @@ export function createCopyExchange(env, user, environment) {
       throw error
     }
     try {
-      const result = await binanceRequest(env, base, '/fapi/v1/order', { method: 'POST', credentials: user, params, order: true })
+      const result = await submitFuturesOrder(env, base, user, params, leverage, checkExposure)
       return orderResult(result, symbol, clientOrderId, params)
     } catch (error) {
       // A duplicate can refer to an accepted earlier submission. Unknown status and unrecognized gateway errors require lookup.
@@ -232,7 +178,8 @@ export function createCopyExchange(env, user, environment) {
   return {
     signals: (portfolioId, since, until) => readSignals(env, portfolioId, since, until),
     positions,
-    open: (symbol, direction, amountUSDT, id) => submit(symbol, direction, amountUSDT, id, false),
+    open: (symbol, direction, amount, id, leverage, sizingMode = 'notional') =>
+      submit(symbol, direction, amount, id, false, leverage, sizingMode),
     close: (symbol, direction, quantity, id) => submit(symbol, direction, quantity, id, true),
     async lookup(symbol, clientOrderId) {
       requireSymbol(symbol)

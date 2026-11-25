@@ -86,3 +86,21 @@ test('an access or rate error pauses streaming and HTTP until the user refreshes
   assert.equal(requests, 1)
   stop()
 })
+
+test('switching the same symbol to another environment discards late HTTP responses and queued stream ticks', async t => {
+  const sockets = setup(t)
+  const oldSnapshot = Promise.withResolvers()
+  const updates = []
+  const snapshot = (environment, price) => ({ symbol: 'BTCUSDT', environment, lastPrice: price, time: timestamp })
+  const observe = price => updates.push(price.price)
+  const stopTestnet = subscribeMarketQuote('spot', 'testnet', 'BTCUSDT', () => oldSnapshot.promise, observe, assert.fail, () => {})
+  sockets[0].emit({ e: '24hrMiniTicker', s: 'BTCUSDT', E: timestamp, c: '9' })
+  stopTestnet()
+  const stopLive = subscribeMarketQuote('spot', 'live', 'BTCUSDT', async () => snapshot('live', '20'), observe, assert.fail, () => {})
+  oldSnapshot.resolve(snapshot('testnet', '10'))
+  await Promise.resolve()
+  t.mock.timers.tick(200)
+  stopLive()
+  assert.deepEqual(updates, ['20'])
+  assert.ok(sockets.every(socket => socket.closed))
+})

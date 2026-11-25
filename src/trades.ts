@@ -3,6 +3,8 @@ export const DAY_MS = 86_400_000
 const PAGE_SIZE = 10
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000
 const numberFormat = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 8 })
+const twoDecimalFormat = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const smallAmountFormat = new Intl.NumberFormat('zh-CN', { maximumSignificantDigits: 8 })
 
 export interface Trade {
   symbol: string
@@ -25,17 +27,22 @@ export interface TradeQuery {
   endTime: number
 }
 
+export interface ObservedTrade extends Trade {
+  observedId: string
+}
+
 export interface TradePage {
-  list: Trade[]
+  list: ObservedTrade[]
   total: number
   cursor?: string
 }
 
-interface BinanceResponse<T> {
-  success: boolean
-  code: string
-  message?: string | null
-  data?: T | null
+export interface ObservationStatus {
+  portfolioId: string
+  startedAt: number
+  lastSuccessAt: number | null
+  lastPositionChangeAt?: number | null
+  error: string
 }
 
 export class TradeRequestError extends Error {
@@ -53,6 +60,11 @@ export function formatNumber(value: number | null | undefined) {
   return value != null && Number.isFinite(value) ? numberFormat.format(value) : '—'
 }
 
+export function formatTradeAmount(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return '—'
+  return (Math.abs(value) > 1 ? twoDecimalFormat : smallAmountFormat).format(value)
+}
+
 export function detailUrl(id: string) {
   return `https://www.binance.com/zh-CN/copy-trading/lead-details/${id}`
 }
@@ -64,7 +76,7 @@ export function numericValue(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-function normalizeTrade(row: Trade): Trade {
+function normalizeTrade(row: ObservedTrade): ObservedTrade {
   return {
     ...row,
     executedQty: numericValue(row.executedQty),
@@ -88,13 +100,6 @@ export function parsePortfolioId(input: string) {
   } catch {
     return undefined
   }
-}
-
-export function tradeKey(trade: Trade) {
-  return [
-    trade.orderTime, trade.orderUpdateTime, trade.symbol, trade.side, trade.type, trade.positionSide,
-    trade.avgPrice, trade.executedQty, trade.quoteQuantity, trade.totalPnl,
-  ].join('|')
 }
 
 export function tradeDirection({ positionSide, side, executedQty }: Trade) {
@@ -126,18 +131,18 @@ function retryDelay(header: string | null) {
   return Number.isSafeInteger(delay) ? Math.max(0, delay) : 0
 }
 
-async function fetchBinanceJson<T>(url: string, init: RequestInit, signal?: AbortSignal) {
+async function monitorRequest<T>(url: string, init: RequestInit, signal?: AbortSignal) {
   const timeout = AbortSignal.timeout(15_000)
   const response = await fetch(url, {
-    ...init,
+    cache: 'no-store', ...init,
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   })
   const retryAfterMs = retryDelay(response.headers.get('retry-after'))
   const payload = await response.json().catch(cause => {
     if (cause instanceof SyntaxError) return null
     throw cause
-  }) as BinanceResponse<T> | null
-  if (response.status !== 200) {
+  })
+  if (!response.ok) {
     const message = typeof payload?.message === 'string' ? payload.message.trim() : ''
     throw new TradeRequestError(
       message || `查询接口返回 HTTP ${response.status}，请稍后重试。`,
@@ -145,42 +150,34 @@ async function fetchBinanceJson<T>(url: string, init: RequestInit, signal?: Abor
       retryAfterMs,
     )
   }
-  if (payload?.code === '11012005') {
-    throw new TradeRequestError('币安查询繁忙，请稍后重试。', 200, retryAfterMs)
-  }
-  if (payload?.success === false) {
-    throw new TradeRequestError(payload.message || `币安查询失败（${payload.code}）。`, 200, retryAfterMs)
-  }
-  if (payload?.code !== '000000') {
-    throw new Error('币安返回的数据格式有变化，请检查官网页面。')
-  }
-  return payload.data
+  return payload as T
 }
 
-export async function fetchBinanceTradePage(
-  query: TradeQuery,
-  indexValue?: string,
-  signal?: AbortSignal,
-): Promise<TradePage> {
-  const data = await fetchBinanceJson<{ list: Trade[]; total: number; indexValue?: string }>('/api/binance/latest-records', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...query, pageSize: PAGE_SIZE, indexValue }),
+export async function fetchObservedTrades(query: TradeQuery, cursor?: string, signal?: AbortSignal): Promise<TradePage> {
+  const params = new URLSearchParams({ portfolioId: query.portfolioId, startTime: String(query.startTime),
+    endTime: String(query.endTime), pageSize: String(PAGE_SIZE) })
+  if (cursor) params.set('cursor', cursor)
+  const data = await monitorRequest<TradePage>(`/api/monitor/trades?${params}`, {}, signal)
+  if (!Array.isArray(data?.list) || !Number.isSafeInteger(data.total) || data.total < 0 ||
+    data.list.some(row => typeof row?.observedId !== 'string' || !row.observedId) ||
+    (data.cursor != null && (typeof data.cursor !== 'string' || !data.cursor || data.cursor === cursor))) {
+    throw new Error('本地成交记录格式无效，请重新查询。')
+  }
+  return { list: data.list.map(normalizeTrade), total: data.total, cursor: data.cursor ?? undefined }
+}
+
+export async function observePortfolios(viewId: string, portfolioIds: string[], signal: AbortSignal) {
+  const data = await monitorRequest<{ portfolios: ObservationStatus[] }>('/api/monitor/observe', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewId, portfolioIds }),
   }, signal)
-  if (!Array.isArray(data?.list) || typeof data.total !== 'number') {
-    throw new Error('币安返回的数据格式有变化，请检查官网页面。')
-  }
-
-  const { list, total, indexValue: cursor } = data
-  return { list: list.map(normalizeTrade), total, cursor: cursor === '-1' ? undefined : cursor }
+  if (!Array.isArray(data?.portfolios)) throw Error('服务未能确认监控状态。')
+  return data.portfolios
 }
 
-export async function fetchBinancePortfolioName(portfolioId: string, signal?: AbortSignal) {
-  const params = new URLSearchParams({ portfolioId })
-  const data = await fetchBinanceJson<{ nickname?: string }>(
-    `/api/binance/portfolio-detail?${params}`, { cache: 'no-store' }, signal,
-  )
-  return typeof data?.nickname === 'string' ? data.nickname.trim() : undefined
+export function releaseObservation(viewId: string) {
+  void fetch('/api/monitor/release', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewId }), keepalive: true,
+  }).catch(() => { /* An unreachable view expires automatically when its lease ends. */ })
 }
 
 export interface ClosedPosition {
@@ -198,25 +195,12 @@ export interface ClosedPosition {
 }
 
 export async function fetchClosedPositions(portfolioId: string, pageNumber: number, signal?: AbortSignal) {
-  const data = await fetchBinanceJson<{ list: Record<string, unknown>[]; total: number }>('/api/binance/position-history', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ portfolioId, pageNumber, pageSize: PAGE_SIZE }),
-  }, signal)
-  if (!Array.isArray(data?.list) || !Number.isSafeInteger(data.total) || data.total < 0) {
-    throw new Error('币安返回的仓位历史格式有变化。')
+  const params = new URLSearchParams({ portfolioId, pageNumber: String(pageNumber), pageSize: String(PAGE_SIZE) })
+  const data = await monitorRequest<{ rows: ClosedPosition[]; total: number; pageSize: number }>(
+    `/api/monitor/positions?${params}`, {}, signal)
+  if (!Array.isArray(data?.rows) || !Number.isSafeInteger(data.total) || data.total < 0 ||
+    !Number.isSafeInteger(data.pageSize) || data.pageSize < 1) {
+    throw new Error('本地已平仓位记录格式无效，请重新查询。')
   }
-  const rows: ClosedPosition[] = []
-  for (const row of data.list) {
-    if (!row || row.status !== 'All Closed' || typeof row.symbol !== 'string' || typeof row.positionId !== 'string') continue
-    const asset = typeof row.marginAsset === 'string' ? row.marginAsset
-      : row.type === 'UM' ? row.symbol.match(/(USDT|USDC)$/)?.[1] ?? '' : ''
-    rows.push({
-      positionId: row.positionId, symbol: row.symbol, side: String(row.side ?? ''), asset,
-      opened: numericValue(row.opened), closed: numericValue(row.closed),
-      avgCost: numericValue(row.avgCost), avgClosePrice: numericValue(row.avgClosePrice),
-      closedVolume: numericValue(row.closedVolume), closingPnl: numericValue(row.closingPnl), roi: numericValue(row.roi),
-    })
-  }
-  return { rows, total: data.total, pageSize: PAGE_SIZE }
+  return data
 }

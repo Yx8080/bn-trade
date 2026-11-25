@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { getCopyPnl, getCopyStatus, updateCopyStatus } from '../src/futures.ts'
+import { getCopyPnl, getCopyStatus, getOtherTrades, getPlatformPnl, getPlatformValuation, updateCopyStatus } from '../src/futures.ts'
 
 test('跟单盈亏按页和当前账户读取，保留不同结算币种与待结算状态', async t => {
   const page = {
@@ -27,7 +27,7 @@ test('跟单状态只读，启动与暂停带上当前环境和账户令牌', as
     return Response.json({ enabled: init.method === 'POST' && calls.length === 2,
       config: null, positions: [], events: [], lastCheck: null, error: '', pending: null })
   })
-  const config = { portfolioId: '123', repeat: 'fixed', amount: 100, maxEntries: 2, maxPositions: 2, stopLoss: 5 }
+  const config = { portfolioIds: ['123', '456'], leverage: 10, sizingMode: 'equityPercent', repeat: 'fixed', amount: 2, maxEntries: 2, maxPositions: 2, stopLoss: 5 }
   const start = { action: 'start', environment: 'testnet', config }
   const pause = { action: 'pause', environment: 'testnet' }
   await getCopyStatus('mock-token')
@@ -40,4 +40,18 @@ test('跟单回执丢失时提示核对状态，不向服务端重复提交', as
   const fetch = t.mock.method(globalThis, 'fetch', () => new Response('Bad Gateway', { status: 502 }))
   await assert.rejects(updateCopyStatus('mock-token', { action: 'pause', environment: 'testnet' }), { code: 'COPY_UNKNOWN' })
   assert.equal(fetch.mock.callCount(), 1)
+})
+
+test('平台手动账本、估值和交易所查询可独立读取，切换市场和交易对使用对应账号凭证', async t => {
+  const urls = []
+  t.mock.method(globalThis, 'fetch', (url, init) => {
+    urls.push(url)
+    assert.equal(init.method, 'GET')
+    assert.equal(init.headers.get('authorization'), 'Bearer test-view')
+    return url.includes('other-trades') ? Response.json({ message: '交易所暂不可用' }, { status: 503 }) : Response.json({ total: 2 })
+  })
+  assert.equal((await getPlatformPnl('test-view', 3)).total, 2)
+  await getPlatformValuation('test-view')
+  await assert.rejects(getOtherTrades('test-view', 'spot', 'ETHBTC'), /交易所暂不可用/)
+  assert.deepEqual(urls, ['/api/platform/pnl?page=3', '/api/platform/valuation', '/api/futures/other-trades?market=spot&symbol=ETHBTC'])
 })
