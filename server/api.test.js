@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { createApiMiddleware } from './api.js'
 
-test('a self-bound HTTP client receives its trading pair’s signed leverage brackets', async t => {
+test('a self-bound futures client can read its position mode and leverage until disconnected', async t => {
   const localFetch = globalThis.fetch.bind(globalThis)
   const payload = { environment: 'testnet', apiKey: 'http-fixture-key', apiSecret: 'http-fixture-secret' }
   t.mock.method(globalThis, 'fetch', (url, init) => {
@@ -17,6 +17,7 @@ test('a self-bound HTTP client receives its trading pair’s signed leverage bra
     if (url.pathname === '/fapi/v3/account') return Response.json({ assets: [] })
     if (url.pathname === '/api/v3/account') return url.hostname === 'demo-api.binance.com'
       ? Response.json({ balances: [], uid: 741 }) : Response.json({ code: -2015 }, { status: 401 })
+    if (url.pathname === '/fapi/v1/positionSide/dual') return Response.json({ dualSidePosition: true })
     const symbol = url.searchParams.get('symbol')
     assert.equal(symbol, 'BTCUSDT')
     if (url.pathname === '/fapi/v1/leverageBracket') return Response.json({ symbol, brackets: [
@@ -36,11 +37,16 @@ test('a self-bound HTTP client receives its trading pair’s signed leverage bra
     const { token, markets } = await response.json()
     assert.deepEqual(markets, ['futures'])
     const headers = { Authorization: 'Bearer ' + token }
+    const modePath = base + 'futures/position-mode'
+    const mode = await localFetch(modePath, { headers })
+    assert.deepEqual(await mode.json(), { environment: 'testnet', mode: 'hedge' })
+    assert.equal((await localFetch(modePath, { headers: { ...headers, 'X-Trading-Environment': 'live' } })).status, 401)
     const path = base + 'futures/leverage?symbol=BTCUSDT'
     const info = await (await localFetch(path, { headers })).json()
     assert.deepEqual([info.symbol, info.symbolMaxLeverage, info.maxLeverage, info.leverage], ['BTCUSDT', 150, 50, 10])
     assert.equal((await localFetch(base + 'accounts/session', { method: 'DELETE', headers })).status, 204)
     assert.equal((await localFetch(path, { headers })).status, 401)
+    assert.equal((await localFetch(modePath, { headers })).status, 401)
   } finally {
     await new Promise(resolve => server.close(resolve))
     await api.close()

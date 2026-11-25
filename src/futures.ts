@@ -1,4 +1,5 @@
 export type Environment = 'testnet' | 'live'
+export type FuturesPositionMode = 'oneWay' | 'hedge'
 type Market = 'spot' | 'futures'
 type PositionSide = 'BOTH' | 'LONG' | 'SHORT'
 type Side = 'BUY' | 'SELL'
@@ -48,6 +49,7 @@ export interface CopyConfig {
   sizingMode: 'margin' | 'equityPercent' | 'notional'
   amount: number
   repeat: 'first' | 'fixed'
+  manualPositionPolicy?: 'skip' | 'add'
   maxEntries: number
   maxPositions: number
   stopLoss: number
@@ -150,6 +152,28 @@ export interface OtherTrades {
   }[]
 }
 
+export interface PositionSource {
+  kind: 'manual' | 'copy' | 'external' | 'unknown'
+  portfolioId?: string | null
+}
+
+export interface PositionAttribution extends Pick<Position, 'symbol' | 'positionSide' | 'quantity' | 'entryPrice' | 'updateTime'> {
+  sources: PositionSource[]
+  complete: boolean
+}
+
+export interface FuturesFills {
+  market: 'futures'
+  symbol: string
+  limit: number
+  windowDays: number
+  atLimit: boolean
+  trades: (Omit<OtherTrades['trades'][number], 'source'> & {
+    source: 'manual' | 'copy' | 'untracked' | 'unverified'
+    portfolioId: string | null
+  })[]
+}
+
 interface OrderIntent {
   environment: Environment
   clientOrderId: string
@@ -164,6 +188,23 @@ export interface OrderInput extends OrderIntent {
   price?: string
   reduceOnly?: boolean
   leverage?: number
+}
+
+export interface ClosePositionInput extends OrderIntent {
+  positionSide: PositionSide
+  direction: 'LONG' | 'SHORT'
+  expectedQuantity: string
+  expectedUpdateTime: number
+  quantity: string
+}
+
+export interface ClosePositionRules {
+  symbol: string
+  environment: Environment
+  baseAsset: string
+  stepSize: string
+  minQty: string
+  maxQty: string | null
 }
 
 export interface SpotBuyInput extends OrderIntent {
@@ -200,6 +241,7 @@ function uncertainOrder() {
 const preOrderErrors = new Set([
   'ORDER_DB_NOT_CONFIGURED', 'ORDER_DB_UNAVAILABLE', 'USERS_NOT_CONFIGURED', 'INVALID_USERS',
   'INVALID_ENVIRONMENT', 'FUTURES_NOT_CONFIGURED', 'SPOT_NOT_CONFIGURED', 'LEVERAGE_NOT_CONFIRMED', 'ACCOUNT_VAULT_UNAVAILABLE',
+  'CLOSE_CHECK_UNAVAILABLE',
 ])
 
 let onUnauthorized: ((token: string) => void) | undefined
@@ -218,7 +260,7 @@ async function request<T>(path: string, token?: string, signal?: AbortSignal, bo
   if (token) headers.set('Authorization', 'Bearer ' + token)
   if (body) headers.set('Content-Type', 'application/json')
   const order = body && 'clientOrderId' in body ? body : undefined
-  const timeout = AbortSignal.timeout(order && 'leverage' in order ? 28_000 : 16_000)
+  const timeout = AbortSignal.timeout(order && ('leverage' in order || 'expectedQuantity' in order) ? 28_000 : 16_000)
   let response: Response
   let data
   try {
@@ -323,6 +365,12 @@ export const getCopyStatus = (token: string, signal?: AbortSignal) =>
 export const getOtherTrades = (token: string, market: OtherTrades['market'], symbol: string, signal?: AbortSignal) =>
   request<OtherTrades>('futures/other-trades?' + new URLSearchParams({ market, symbol }), token, signal)
 
+export const getFuturesFills = (token: string, symbol: string, signal?: AbortSignal) =>
+  request<FuturesFills>('futures/other-trades?' + new URLSearchParams({ market: 'futures', symbol, scope: 'all' }), token, signal)
+
+export const getPositionSources = (token: string, signal?: AbortSignal) =>
+  request<{ environment: Environment; positions: PositionAttribution[] }>('futures/position-sources', token, signal)
+
 export const getCopyPnl = (token: string, page: number, signal?: AbortSignal) =>
   request<CopyPnlPage>('futures/copy-pnl?' + new URLSearchParams({ page: String(page) }), token, signal)
 
@@ -337,6 +385,15 @@ export const updateCopyStatus = (token: string, command: CopyCommand, signal?: A
 
 export const getAccount = (token: string, signal?: AbortSignal) =>
   request<FuturesAccount>('futures/account', token, signal)
+
+export async function getFuturesPositionMode(token: string, environment: Environment, signal?: AbortSignal): Promise<FuturesPositionMode> {
+  if (environment !== selectedEnvironment) throw environmentChanged()
+  const result = await request<{ environment: Environment; mode: FuturesPositionMode }>(
+    'futures/position-mode', token, signal, undefined, environment)
+  if (result?.environment !== environment || environment !== selectedEnvironment) throw environmentChanged()
+  if (result.mode !== 'oneWay' && result.mode !== 'hedge') throw Error('币安账户持仓模式无效。')
+  return result.mode
+}
 
 export const getCopyEquity = (token: string, signal?: AbortSignal) =>
   request<{ equity: number; asset: 'USDT'; time: number }>('futures/equity', token, signal)
@@ -384,6 +441,21 @@ export const getSpotQuote = (symbol: string, signal?: AbortSignal, environment?:
 
 export const submitOrder = (token: string, input: OrderInput, signal?: AbortSignal) =>
   request<OrderResult>('futures/orders', token, signal, input)
+
+export async function getClosePositionRules(token: string, symbol: string, environment: Environment, signal?: AbortSignal) {
+  if (environment !== selectedEnvironment) throw environmentChanged()
+  const rules = await request<ClosePositionRules>('futures/close-position?' + new URLSearchParams({ symbol }),
+    token, signal, undefined, environment)
+  if (rules?.environment !== environment || selectedEnvironment !== environment) throw environmentChanged()
+  const decimal = (value: unknown) => typeof value === 'string' && /^\d{1,20}(?:\.\d{1,18})?$/.test(value)
+  if (rules.symbol !== symbol || typeof rules.baseAsset !== 'string' || !rules.baseAsset.trim() ||
+    !decimal(rules.stepSize) || !/[1-9]/.test(rules.stepSize) || !decimal(rules.minQty) ||
+    !(rules.maxQty === null || decimal(rules.maxQty))) throw Error('无法核实此合约的平仓数量规则。')
+  return rules
+}
+
+export const closePosition = (token: string, input: ClosePositionInput) =>
+  request<OrderResult>('futures/close-position', token, undefined, input)
 
 export const buySpot = (token: string, input: SpotBuyInput, signal?: AbortSignal) =>
   request<OrderResult>('spot/orders', token, signal, input)

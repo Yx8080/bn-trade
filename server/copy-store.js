@@ -1,8 +1,12 @@
 export function createCopyStore(db) {
   const eligible = column => `(? IS NULL OR ${column} IN (SELECT value FROM json_each(?)))`
   const ownerFilter = owners => owners ? [1, JSON.stringify(owners)] : [null, null]
-  const matchingOrders = db.prepare(`SELECT order_id FROM copy_executions WHERE environment = ? AND user_id = ?
-    AND key_identity = ? AND symbol = ? AND order_id IN (SELECT value FROM json_each(?))`)
+  const matchingOrders = db.prepare(`SELECT order_id AS orderId,
+    CASE WHEN COUNT(DISTINCT portfolio_id)=1 THEN MIN(portfolio_id) END AS portfolioId,
+    CASE WHEN COUNT(DISTINCT kind)=1 THEN MIN(kind) END AS copyKind,
+    CASE WHEN COUNT(DISTINCT direction)=1 THEN MIN(direction) END AS copyDirection
+    FROM copy_executions WHERE environment=? AND user_id=? AND key_identity=? AND symbol=?
+    AND order_id IN (SELECT value FROM json_each(?)) GROUP BY order_id`)
   const get = db.prepare('SELECT state, revision FROM copy_strategies WHERE environment = ? AND user_id = ?')
   const list = db.prepare(`SELECT user_id FROM copy_strategies WHERE environment = ? AND runnable = 1
     AND next_check <= ? AND lease_until <= ? AND ${eligible('user_id')} ORDER BY next_check LIMIT 4`)
@@ -54,8 +58,8 @@ export function createCopyStore(db) {
     kind, time, quantity, price, amounts FROM copy_executions WHERE environment = ? AND user_id = ? AND key_identity = coalesce(?, key_identity)
     ORDER BY time DESC, client_id LIMIT ? OFFSET ?`)
   return {
-    orderIds(environment, id, keyIdentity, symbol, ids) {
-      return new Set(matchingOrders.all(environment, id, keyIdentity, symbol, JSON.stringify(ids)).map(row => row.order_id))
+    orderPortfolios(environment, id, keyIdentity, symbol, ids) {
+      return matchingOrders.all(environment, id, keyIdentity, symbol, JSON.stringify(ids))
     },
     read(environment, id) {
       const row = get.get(environment, id)

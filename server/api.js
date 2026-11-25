@@ -6,6 +6,7 @@ import { getTradingEnvironment } from '../worker/trading.js'
 import { createBinanceTransport } from './binance-transport.js'
 import { createCopyService } from './copy-service.js'
 import { platformPnl } from './platform-pnl.js'
+import { positionSources } from './position-sources.js'
 import { createPlatformSettlement } from './platform-settlement.js'
 import { accountBinding } from './account-binding.js'
 import { createConfiguredVerifier } from './configured-accounts.js'
@@ -50,6 +51,7 @@ export function createApiMiddleware({ env, databaseFile }) {
       ['/api/accounts/bind', accountBinding], ['/api/accounts/session', accountBinding],
       ['/api/futures/copy', copy.fetch], ['/api/futures/copy-pnl', copy.fetch],
       ['/api/futures/other-trades', copy.fetch],
+      ['/api/futures/position-sources', positionSources],
       ['/api/platform/pnl', platformPnl], ['/api/platform/valuation', platformPnl],
     ])
     environments.set(environment, { context, handlers, copy, settlement })

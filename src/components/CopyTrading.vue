@@ -14,11 +14,11 @@ const props = defineProps<{ entries: LeadPortfolio[]; environment: Environment; 
 const savedDraft = defineModel<CopyConfig | null>('draft', { required: true })
 const emit = defineEmits<{ connect: []; edit: []; refresh: [] }>()
 function copyPlan(plan: CopyConfig): CopyConfig {
-  return { ...plan, portfolioIds: [...plan.portfolioIds] }
+  return { ...plan, portfolioIds: [...plan.portfolioIds], manualPositionPolicy: plan.manualPositionPolicy ?? 'skip' }
 }
 const draft = ref<CopyConfig>(savedDraft.value ? copyPlan(savedDraft.value) : {
   portfolioIds: props.entries.slice(0, 1).map(entry => entry.id), sizingMode: 'margin', amount: 0, leverage: 1, repeat: 'fixed',
-  maxEntries: 2, maxPositions: 2, stopLoss: 5,
+  maxEntries: 2, maxPositions: 2, stopLoss: 5, manualPositionPolicy: 'skip',
 })
 const status = ref<CopyStatus | null>(null)
 const statusError = ref('')
@@ -196,6 +196,7 @@ function matchesConfig(left: CopyConfig, right: CopyConfig | null) {
   return right != null && left.portfolioIds.length === right.portfolioIds.length
     && left.portfolioIds.every(id => right.portfolioIds.includes(id))
     && left.repeat === right.repeat && left.maxEntries === right.maxEntries && left.maxPositions === right.maxPositions
+    && (left.manualPositionPolicy ?? 'skip') === (right.manualPositionPolicy ?? 'skip')
     && left.sizingMode === right.sizingMode && left.amount === right.amount
     && left.stopLoss === right.stopLoss && left.leverage === right.leverage
 }
@@ -288,17 +289,30 @@ async function submit(action: 'start' | 'pause') {
             <span v-else-if="draft.sizingMode === 'notional' && draft.leverage == null">原策略按每笔合约价值下单，实际初始保证金取决于交易对的杠杆倍数。</span>
           </p>
           <p v-if="percentMode && equityError" class="notice warning" role="status">{{ equityError }} <button type="button" class="text-button" @click="refreshEquity">重试</button></p>
-          <fieldset class="copy-choice-group">
-            <legend>带单员再次同向开仓时</legend>
-            <div class="copy-choices">
-              <label class="copy-choice">
-                <input v-model="draft.repeat" name="copy-repeat" type="radio" value="first" />只跟首笔
-              </label>
-              <label class="copy-choice">
-                <input v-model="draft.repeat" name="copy-repeat" type="radio" value="fixed" />按相同规则加仓
-              </label>
-            </div>
-          </fieldset>
+          <div class="two-fields copy-policy-row">
+            <fieldset class="copy-choice-group">
+              <legend>已有平台手动同向仓位时</legend>
+              <div class="copy-choices">
+                <label class="copy-choice">
+                  <input v-model="draft.manualPositionPolicy" name="copy-manual-policy" type="radio" value="skip" />跳过
+                </label>
+                <label class="copy-choice">
+                  <input v-model="draft.manualPositionPolicy" name="copy-manual-policy" type="radio" value="add" />跟随加仓
+                </label>
+              </div>
+            </fieldset>
+            <fieldset class="copy-choice-group">
+              <legend>带单员再次同向开仓时</legend>
+              <div class="copy-choices">
+                <label class="copy-choice">
+                  <input v-model="draft.repeat" name="copy-repeat" type="radio" value="first" />只跟首笔
+                </label>
+                <label class="copy-choice">
+                  <input v-model="draft.repeat" name="copy-repeat" type="radio" value="fixed" />按相同规则加仓
+                </label>
+              </div>
+            </fieldset>
+          </div>
           <div class="two-fields">
             <label class="field">
               <span>单仓最多开仓次数</span>
@@ -315,10 +329,8 @@ async function submit(action: 'start' | 'pause') {
           <label class="field">
             <span>单仓止损金额（USDT）</span>
             <input v-model.number="draft.stopLoss" type="number" step="0.00000001" min="0.00000001" required />
-            <small>服务端按标记价格检查整仓浮亏，触及阈值后市价平仓。跳价、滑点或服务中断可能使实际亏损超过设定金额。</small>
           </label>
         </fieldset>
-        <p class="ticket-hint">启动后仅跟随新成交。同一交易对由先开仓的组合独立管理，持仓期间跳过其他组合在该交易对的信号。该组合首次减仓或平仓时，跟单仓位整仓退出。请使用单向持仓模式，并为策略单独保留交易对。</p>
         <p v-if="locked" class="ticket-hint">{{ status?.enabled ? '策略运行中。暂停开仓后，待跟单仓位和待核实订单全部结清即可更改设置。' : '仓位或订单仍在管理中。可按原设置恢复跟单，结清后可修改参数。' }}</p>
         <p v-if="actionError" class="notice error" role="alert">{{ actionError }}</p>
         <button v-if="status?.enabled" type="button" class="btn" :disabled="busy || !synchronized" @click="submit('pause')">
@@ -375,9 +387,11 @@ async function submit(action: 'start' | 'pause') {
         <div><dt>跟单杠杆</dt><dd>{{ preview.leverage ? preview.leverage + ' 倍' : '沿用交易对当前杠杆' }}</dd></div>
         <div v-if="previewEstimate?.margin != null"><dt>每笔预计初始保证金</dt><dd>约 {{ formatNumber(previewEstimate.margin) }} USDT</dd></div>
         <div v-if="previewEstimate?.notional != null"><dt>每笔预计合约价值</dt><dd>约 {{ formatNumber(previewEstimate.notional) }} USDT</dd></div>
-        <div><dt>同向加仓</dt><dd>{{ preview.repeat === 'first' ? '只跟首笔' : '按相同规则加仓，最多开仓 ' + preview.maxEntries + ' 次（含首笔）' }}</dd></div>
+        <div><dt>已有平台手动同向仓位</dt><dd>{{ preview.manualPositionPolicy === 'add' ? '跟随加仓' : '跳过' }}
+          <small v-if="preview.manualPositionPolicy === 'add'" class="review-id">仅管理跟单数量，交易对杠杆由整个仓位共用。</small></dd></div>
+        <div><dt>带单员再次同向开仓</dt><dd>{{ preview.repeat === 'first' ? '只跟首笔' : '按相同规则加仓，最多开仓 ' + preview.maxEntries + ' 次（含首笔）' }}</dd></div>
         <div><dt>同时持仓上限</dt><dd>{{ preview.maxPositions }} 个交易对</dd></div>
-        <div><dt>单仓止损</dt><dd>浮亏 {{ formatNumber(preview.stopLoss) }} USDT 时触发</dd></div>
+        <div><dt>单仓止损</dt><dd>跟单仓位浮亏 {{ formatNumber(preview.stopLoss) }} USDT 时触发</dd></div>
       </dl>
       <p v-if="preview.sizingMode === 'equityPercent'" class="dialog-description">每次开仓或加仓使用当时的账户总权益重新计算。{{ !session ? '连接账户后可查看金额估算。' : '' }}</p>
       <p v-if="preview.sizingMode === 'equityPercent' && equityLoading" class="ticket-hint" role="status">正在读取账户总权益…</p>
@@ -394,6 +408,7 @@ async function submit(action: 'start' | 'pause') {
 </template>
 
 <style scoped>
+.copy-policy-row { grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); align-items: start; }
 .copy-choice-group { margin: 0; padding: 0; border: 0; min-width: 0; }
 .copy-choice-group legend { margin-bottom: 6px; padding: 0; font-size: 12px; font-weight: 600; color: #4c6257; }
 .copy-choices { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }

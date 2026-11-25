@@ -11,8 +11,12 @@ export async function submitPlatformOrder(env, environment, userId, market, apiK
   try {
     data = await send()
   } catch (error) {
+    // A duplicate may be the acknowledgement of an earlier accepted request.
+    // Keep its reservation and direct the ticket to lookup by the same ID.
+    if (!error.definite && error instanceof ApiError
+      && (['-4111', '-4116'].includes(error.code) || /duplicat/i.test(error.message))) throw unknownOrder()
     const definite = error.definite || (error instanceof ApiError && error.status >= 400 && error.status < 500
-      && /^-\d+$/.test(error.code) && !['-4111', '-4116'].includes(error.code) && !/duplicat/i.test(error.message))
+      && /^-\d+$/.test(error.code))
     if (definite) env.orderStore.platform?.reject(environment, userId, market, id, apiKey)
     throw error
   }

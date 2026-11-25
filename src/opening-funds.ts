@@ -15,7 +15,9 @@ export function availableUsdt(balances: FuturesAccount['balances']): number | nu
 
 // Binance USDT balances and both amount fields support eight decimal places.
 export function amountFromBalance(available: number, percent: number): number {
-  const units = Math.round(available * 1e8)
-  if (!Number.isSafeInteger(units) || units <= 0 || ![10, 25, 50, 100].includes(percent)) return 0
+  if (!Number.isInteger(percent) || percent < 1 || percent > 100) return 0
+  let units = Math.round(available * 1e8)
+  if (!Number.isSafeInteger(units) || units <= 0) return 0
+  if (units / 1e8 > available) units--
   return Number(BigInt(units) * BigInt(percent) / 100n) / 1e8
 }

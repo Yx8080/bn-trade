@@ -10,7 +10,6 @@ const props = withDefaults(defineProps<{
   placeholder?: string
   disabled?: boolean
   required?: boolean
-  description?: string
 }>(), { fallback: MIN_LEVERAGE })
 const value = defineModel<number | null>({ required: true })
 const field = useId()
@@ -31,18 +30,15 @@ function change(event: Event) {
     <div class="leverage-controls">
       <div class="slider">
         <input type="range" :min="MIN_LEVERAGE" :max="limit" step="1" :value="rangeValue"
-          :disabled="disabled" :aria-label="label + '滑块'" :aria-valuetext="rangeValue + ' 倍'"
-          :aria-describedby="description ? field + '-help' : undefined" @input="change" />
+          :disabled="disabled" :aria-label="label + '滑块'" :aria-valuetext="rangeValue + ' 倍'" @input="change" />
         <div class="bounds" aria-hidden="true"><span>{{ MIN_LEVERAGE }}×</span><span v-if="!max && !sliderMax">快捷范围</span><span>{{ limit }}×</span></div>
       </div>
       <div class="leverage-number">
         <input :id="field" type="number" inputmode="numeric" :min="MIN_LEVERAGE" :max="max" step="1"
-          :required="required" :value="value ?? ''" :placeholder="placeholder" :disabled="disabled"
-          :aria-describedby="description ? field + '-help' : undefined" @input="change" />
+          :required="required" :value="value ?? ''" :placeholder="placeholder" :disabled="disabled" @input="change" />
         <span aria-hidden="true">倍</span>
       </div>
     </div>
-    <small v-if="description" :id="field + '-help'">{{ description }}</small>
   </div>
 </template>
 
@@ -55,5 +51,4 @@ function change(event: Event) {
 .leverage-number input { padding-right: 24px; appearance: textfield; }
 .leverage-number input::-webkit-inner-spin-button { -webkit-appearance: none; }
 .leverage-number span { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
-.leverage-field small { font-size: 12px; line-height: 1.5; color: var(--muted); font-weight: 450; }
 </style>

@@ -18,7 +18,7 @@ function normalizeFill(row, symbol, spot) {
     realizedPnl: spot ? null : row.realizedPnl, marginAsset: spot ? null : row.marginAsset ?? null }
 }
 
-export async function otherTrades(env, user, environment, market, symbol) {
+function marketAccess(env, user, environment, market, symbol) {
   if (market !== 'spot' && market !== 'futures') throw new ApiError(400, 'INVALID_MARKET', '请选择现货或合约市场。')
   if (typeof symbol !== 'string' || !/^[\p{Lu}\p{Lo}\p{Nd}]{2,32}$/u.test(symbol)) {
     throw new ApiError(400, 'INVALID_SYMBOL', '请输入完整的交易对。')
@@ -28,38 +28,87 @@ export async function otherTrades(env, user, environment, market, symbol) {
   if (!credentials.apiKey || !credentials.apiSecret) throw new ApiError(503,
     spot ? 'SPOT_NOT_CONFIGURED' : 'FUTURES_NOT_CONFIGURED', '当前账户尚未配置此市场的交易所密钥。')
   const base = (spot ? spotBases : futuresBases)[environment]
-  const signed = (path, params) => binanceRequest(env, base, path, { credentials, params })
-  const [inventory, fills] = await Promise.all([
-    spot ? signed('/api/v3/account', { omitZeroBalances: 'true' }) : signed('/fapi/v3/positionRisk'),
-    signed(spot ? '/api/v3/myTrades' : '/fapi/v1/userTrades', { symbol, limit }),
-  ])
-  if (!Array.isArray(fills) || fills.length > limit) throw invalidData()
-  const rows = fills.map(fill => normalizeFill(fill, symbol, spot))
-  if (new Set(rows.map(row => row.id)).size !== rows.length) throw invalidData()
-  const db = env.orderStore
-  const key = ledgerIdentity(user.id, credentials.apiKey)
-  const ids = [...new Set(rows.map(row => row.orderId))]
-  const known = db.platform.orderIds(environment, user.id, key, market, symbol, ids)
+  return { db: env.orderStore, environment, market, symbol, spot, userId: user.id, key: ledgerIdentity(user.id, credentials.apiKey),
+    signed: (path, params) => binanceRequest(env, base, path, { credentials, params }) }
+}
+
+async function classifyFills(access, fills, scope) {
+  if (!Array.isArray(fills)) throw invalidData()
+  const includeAll = scope !== 'other'
+  const { db, environment, market, symbol, spot, userId, key, signed } = access
+  const byId = new Map()
+  for (const fill of fills) {
+    const row = normalizeFill(fill, symbol, spot)
+    const previous = byId.get(row.id)
+    if (previous && JSON.stringify(previous) !== JSON.stringify(row)) throw invalidData()
+    byId.set(row.id, row)
+  }
+  const ids = [...new Set([...byId.values()].map(row => row.orderId))]
+  const known = new Map()
+  for (const orderId of db.platform.orderIds(environment, userId, key, market, symbol, ids)) {
+    known.set(orderId, { source: 'manual', portfolioId: null })
+  }
   if (!spot) {
-    for (const value of db.copy.orderIds(environment, user.id, key, symbol, ids)) known.add(value)
+    for (const { orderId, portfolioId, copyKind, copyDirection } of db.copy.orderPortfolios(environment, userId, key, symbol, ids)) {
+      known.set(orderId, portfolioId && !known.has(orderId)
+        ? { source: 'copy', portfolioId, copyKind, copyDirection } : { source: 'unverified', portfolioId: null })
+    }
   }
   const provenExternal = new Set()
   // Legacy requests and acknowledgements in flight may only have a client ID
   // in SQLite. Cross-check the exchange order before labeling its fill.
-  const crossCheck = ids.some(value => !known.has(value)) && db.hasUnlinkedRequests(environment, market, user.id, key, symbol)
+  const crossCheck = ids.some(value => !known.has(value)) && db.hasUnlinkedRequests(environment, market, userId, key, symbol)
   if (crossCheck) {
-    const orders = await signed(spot ? '/api/v3/allOrders' : '/fapi/v1/allOrders', { symbol, limit })
-    if (!Array.isArray(orders) || orders.some(row => row?.symbol !== symbol || !id(row.orderId)
-      || typeof row.clientOrderId !== 'string' || !row.clientOrderId)) throw invalidData()
-    const reserved = db.reservedOrderIds(environment, market, user.id, key, symbol, orders)
+    let orders
+    try {
+      orders = await signed(spot ? '/api/v3/allOrders' : '/fapi/v1/allOrders', { symbol, limit })
+      if (!Array.isArray(orders) || orders.some(row => row?.symbol !== symbol || !id(row.orderId)
+        || typeof row.clientOrderId !== 'string' || !row.clientOrderId)
+        || new Set(orders.map(row => row.orderId)).size !== orders.length) throw invalidData()
+    } catch (error) {
+      if (!includeAll) throw error
+      // Executions are already authenticated. Unavailable extra order evidence
+      // leaves the unmatched fills unattributed.
+      orders = []
+    }
+    const reserved = db.reservedOrderSources(environment, market, userId, key, symbol, orders)
     for (const row of orders) {
-      if (reserved.has(row.orderId)) known.add(row.orderId)
+      if (known.has(row.orderId)) continue
+      if (reserved.has(row.orderId)) known.set(row.orderId, reserved.get(row.orderId))
       else provenExternal.add(row.orderId)
     }
   }
-  const trades = rows.filter(row => !known.has(row.orderId)).map(row => ({ ...row,
-    source: crossCheck && !provenExternal.has(row.orderId) ? 'unverified' : 'untracked' }))
-  trades.sort((a, b) => b.time - a.time || b.id.length - a.id.length || b.id.localeCompare(a.id))
-  return { market, symbol, balances: spot ? spotBalances(inventory) : [],
-    positions: spot ? [] : futuresPositions(inventory), trades }
+  const trades = []
+  for (const row of byId.values()) {
+    const origin = known.get(row.orderId)
+    if (origin && !includeAll) continue
+    const source = origin?.source ?? (crossCheck && !provenExternal.has(row.orderId) ? 'unverified' : 'untracked')
+    const trade = { ...row, source }
+    if (includeAll) trade.portfolioId = origin?.portfolioId ?? null
+    if (scope === 'position') {
+      trade.copyKind = origin?.copyKind ?? null
+      trade.copyDirection = origin?.copyDirection ?? null
+    }
+    trades.push(trade)
+  }
+  return trades.sort((a, b) => b.time - a.time || b.id.length - a.id.length || b.id.localeCompare(a.id))
+}
+
+export function classifyFuturesFills(env, user, environment, symbol, fills) {
+  return classifyFills(marketAccess(env, user, environment, 'futures', symbol), fills, 'position')
+}
+
+export async function otherTrades(env, user, environment, market, symbol, scope = 'other') {
+  const access = marketAccess(env, user, environment, market, symbol)
+  const { signed, spot } = access
+  if (scope !== 'other' && (scope !== 'all' || spot)) throw new ApiError(400, 'INVALID_SCOPE', '请选择有效的合约成交查询范围。')
+  const includeAll = scope === 'all'
+  const [inventory, fills] = await Promise.all([
+    includeAll ? null : spot ? signed('/api/v3/account', { omitZeroBalances: 'true' }) : signed('/fapi/v3/positionRisk'),
+    signed(spot ? '/api/v3/myTrades' : '/fapi/v1/userTrades', { symbol, limit }),
+  ])
+  if (!Array.isArray(fills) || fills.length > limit) throw invalidData()
+  const trades = await classifyFills(access, fills, scope)
+  if (includeAll) return { market, symbol, trades, limit, windowDays: 7, atLimit: fills.length === limit }
+  return { market, symbol, balances: spot ? spotBalances(inventory) : [], positions: spot ? [] : futuresPositions(inventory), trades }
 }

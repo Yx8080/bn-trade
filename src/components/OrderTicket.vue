@@ -1,16 +1,18 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, useId, watch } from 'vue'
 import { Tickets } from '@element-plus/icons-vue'
 import {
   buySpot,
   createClientOrderId,
   FuturesError,
+  getFuturesPositionMode,
   getManualOrderSize,
   lookupOrder,
   lookupSpotOrder,
   submitOrder,
   type BoundSession,
   type Environment,
+  type FuturesPositionMode,
   type OrderInput,
   type OrderResult,
   type ManualOrderSize,
@@ -19,7 +21,7 @@ import {
   type SpotBuyInput,
 } from '../futures'
 import type { OpeningFunds } from '../opening-funds'
-import { estimateOpeningMargin, type OpeningSize } from '../manual-opening'
+import { estimateOpeningMargin, manualOpeningDirection, type ManualDirection } from '../manual-opening'
 import { formatNumber } from '../trades'
 import WorkspaceDialog from './WorkspaceDialog.vue'
 import LeverageControl from './LeverageControl.vue'
@@ -43,39 +45,53 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ connect: []; ordered: []; refresh: [] }>()
 const futures = computed(() => props.market === 'futures')
-const side = ref<OrderInput['side']>('BUY')
-const position = ref<OrderInput['positionSide']>('BOTH')
+const mode = ref<FuturesPositionMode | null>(null)
+const modeError = ref('')
+const modeRefresh = ref(0)
+function refreshModeOnReturn() {
+  if (!document.hidden && futures.value && props.active && props.session) modeRefresh.value++
+}
+onMounted(() => document.addEventListener('visibilitychange', refreshModeOnReturn))
+watch([() => futures.value && props.active, () => props.session, () => props.token, () => props.environment, modeRefresh],
+  async ([active, session, token, environment], _, cleanup) => {
+    mode.value = null
+    modeError.value = ''
+    if (!active || !session) return
+    if (!token || session.environment !== environment) {
+      modeError.value = '请重新连接当前环境的账户。'
+      return
+    }
+    const controller = new AbortController()
+    cleanup(() => controller.abort())
+    try {
+      const current = await getFuturesPositionMode(token, environment, controller.signal)
+      if (!controller.signal.aborted) mode.value = current
+    } catch (cause) {
+      if (!controller.signal.aborted) modeError.value = cause instanceof Error ? cause.message : '暂时无法读取币安账户持仓模式。'
+    }
+  }, { immediate: true })
 const type = ref<OrderInput['type']>('MARKET')
 const quantity = ref('')
-const sizeMode = ref<ManualSizingMode | 'quantity'>('margin')
+const limitSizeMode = ref<ManualSizingMode | 'quantity'>('margin')
+const sizeMode = computed(() => type.value === 'LIMIT' ? limitSizeMode.value : 'margin')
 const marginAmount = ref('')
 const equityPercent = ref('1')
 const limit = ref('')
-const reduce = ref(false)
-const closing = computed(() => position.value === 'BOTH' ? reduce.value
-  : position.value === 'LONG' ? side.value === 'SELL' : side.value === 'BUY')
-const moneyMode = computed(() => futures.value && !closing.value && sizeMode.value !== 'quantity')
 const leverage = ref<number | null>(null)
+const leverageExpanded = ref(false)
+const leveragePanelId = useId()
 const { info: tiers, error: leverageError, loading: leverageLoading, refresh: refreshLeverage } =
   useFuturesLeverage(() => futures.value ? props.symbol : '', () => props.session, () => props.token)
 const currentLeverage = computed(() => tiers.value?.leverage ?? undefined)
 const maxLeverage = computed(() => tiers.value?.maxLeverage ?? tiers.value?.symbolMaxLeverage)
-const leverageHelp = computed(() => {
-  if (!tiers.value) return leverageLoading.value ? '正在读取币安账户杠杆档位…'
-    : props.session ? '可手动填写倍数，提交时由币安确认。' : '连接账户后可读取该交易对的币安杠杆上限。'
-  const limits = [props.symbol + ' 的币安最高杠杆 ' + tiers.value.symbolMaxLeverage + ' 倍']
-  if (tiers.value.maxLeverage) limits.push('当前持仓档位上限 ' + tiers.value.maxLeverage + ' 倍')
-  if (currentLeverage.value) limits.push('留空沿用当前 ' + currentLeverage.value + ' 倍')
-  return limits.join('，') + '。可用倍数以币安最终确认为准。调整杠杆也会影响该交易对的已有持仓。'
-})
-watch(() => props.symbol, () => { leverage.value = null })
+const effectiveLeverage = computed(() => leverage.value ?? currentLeverage.value)
 const failure = ref('')
 const inFlight = ref(false)
 const key = pendingOrderKey(props.session?.id, props.environment, props.market)
 const pending = ref<PendingOrder | null>(props.session ? readPending(key) : null)
 const result = ref<OrderResult>()
 const forgetOpen = ref(false)
-type Preview = { kind: 'futures'; input: OrderInput; accountLeverage?: number; closing: boolean; sizing?: ManualOrderSize; percent?: string }
+type Preview = { kind: 'futures'; input: OrderInput; direction: ManualDirection; accountLeverage?: number; sizing?: ManualOrderSize; percent?: string }
   | { kind: 'spot'; input: SpotBuyInput }
 const preview = ref<Preview | null>(null)
 const previewPrice = ref('')
@@ -86,38 +102,50 @@ const previewNotional = computed(() => preview.value?.kind === 'futures'
 const base = computed(() => props.symbol.slice(0, -4))
 const positive = (text: string) =>
   /^(?:0|[1-9]\d{0,19})(?:\.\d{1,18})?$/.test(text) && Number(text) > 0
-const opening = computed(() => futures.value && !closing.value)
-const awaitingFunds = computed(() => opening.value && !!props.session &&
-  (props.funds.state !== 'ready' || props.funds.available == null))
+const awaitingFunds = computed(() => props.funds.state !== 'ready' || props.funds.available == null)
 const openingAmount = computed(() => sizeMode.value === 'margin' ? marginAmount.value
   : sizeMode.value === 'equityPercent' ? equityPercent.value : quantity.value)
 const orderPrice = computed(() => Number(type.value === 'LIMIT' ? limit.value : props.price))
 function selectMargin(amount: number) {
-  marginAmount.value = amount.toFixed(8).replace(/\.?0+$/, '')
+  marginAmount.value = Number.isFinite(amount) && amount > 0 ? amount.toFixed(8).replace(/\.?0+$/, '') : ''
 }
-function estimate(size: OpeningSize) {
-  return estimateOpeningMargin(size, { symbol: props.symbol, side: side.value, positionSide: position.value },
-    props.positions, orderPrice.value, leverage.value ?? currentLeverage.value)
+function openingMarginFor(direction: ManualDirection) {
+  if (!mode.value || !props.session || awaitingFunds.value || sizeMode.value === 'equityPercent' || !positive(openingAmount.value)) return null
+  const size = sizeMode.value === 'margin' ? { margin: Number(marginAmount.value) } : { quantity: Number(quantity.value) }
+  return estimateOpeningMargin(size, { symbol: props.symbol, ...manualOpeningDirection(mode.value, direction) },
+    props.positions, orderPrice.value, effectiveLeverage.value)
 }
 function insufficientFunds(margin: number | null) {
   const available = props.funds.available
   if (margin == null || margin === 0 || available == null || margin <= available + Math.abs(available) * Number.EPSILON * 4) return ''
   return '预计开仓需 ' + formatNumber(margin) + ' USDT 保证金，超过可用余额。'
 }
-const sizeIssue = computed(() => {
-  if (!opening.value || !props.session) return ''
-  if (sizeMode.value === 'equityPercent') {
-    return equityPercent.value && (!positive(equityPercent.value) || Number(equityPercent.value) > 100)
-      ? '请输入大于 0 且不超过 100 的比例。' : ''
-  }
-  const fixed = sizeMode.value === 'margin'
-  const value = openingAmount.value
-  if (!value) return ''
-  if (!positive(value)) return fixed ? '请输入大于 0 的保证金。' : '请输入大于 0 的合约数量。'
-  const margin = estimate(fixed ? { margin: Number(value) } : { quantity: Number(value) })
-  if (margin == null && !fixed && orderPrice.value > 0 && !leverageLoading.value && !(leverage.value ?? currentLeverage.value))
+const inputIssue = computed(() => {
+  if (!futures.value || !props.session) return ''
+  if (type.value === 'LIMIT' && limit.value && !positive(limit.value)) return '请输入大于 0 的限价。'
+  if (leverage.value != null && !isAppLeverage(leverage.value, maxLeverage.value))
+    return maxLeverage.value ? '杠杆倍数须为 1 至 ' + maxLeverage.value + ' 的整数。' : '杠杆倍数须为正整数。'
+  if (sizeMode.value === 'equityPercent')
+    return equityPercent.value && (!positive(equityPercent.value) || Number(equityPercent.value) > 100) ? '请输入大于 0 且不超过 100 的比例。' : ''
+  if (openingAmount.value && !positive(openingAmount.value)) return sizeMode.value === 'margin' ? '请输入大于 0 的保证金。' : '请输入大于 0 的合约数量。'
+  return ''
+})
+function directionIssue(direction: ManualDirection) {
+  if (!futures.value || !props.session || !mode.value) return ''
+  if (awaitingFunds.value || !positive(openingAmount.value)) return ''
+  const margin = openingMarginFor(direction)
+  if (!effectiveLeverage.value && !leverageLoading.value && (sizeMode.value !== 'quantity' || margin !== 0))
     return '请填写合约杠杆倍数，以核对开仓所需保证金。'
   return insufficientFunds(margin)
+}
+const formIssue = computed(() => {
+  if (inputIssue.value) return inputIssue.value
+  const long = directionIssue('LONG')
+  const short = directionIssue('SHORT')
+  if (long && short) return long === short ? long : '多仓和空仓均无法按当前金额开仓。'
+  if (futures.value && props.session && !canUseQuote.value && positive(openingAmount.value))
+    return '请刷新当前交易环境的行情后预览。'
+  return ''
 })
 const previewTime = ref(0)
 let mounted = true
@@ -128,15 +156,31 @@ function cancelSizeRequest() {
   sizeRequest = undefined
   calculating.value = false
 }
-watch([side, position, type, reduce, leverage, limit, sizeMode, marginAmount, equityPercent, () => props.symbol], cancelSizeRequest, { flush: 'sync' })
+function invalidatePreview() {
+  cancelSizeRequest()
+  preview.value = null
+}
+watch([() => props.symbol, () => props.environment, () => props.market], () => {
+  leverage.value = null
+  leverageExpanded.value = false
+  quantity.value = ''
+  limit.value = ''
+}, { flush: 'sync' })
+watch([mode, type, leverage, limit, sizeMode, marginAmount, equityPercent, quantity,
+  () => props.session, () => props.token, () => props.symbol, () => props.market, () => props.environment], () => {
+  invalidatePreview()
+  failure.value = ''
+}, { flush: 'sync' })
+watch([currentLeverage, maxLeverage], invalidatePreview, { flush: 'sync' })
 watch(() => props.active, active => {
   if (!active) {
-    cancelSizeRequest()
-    preview.value = null
+    invalidatePreview()
+    leverageExpanded.value = false
     forgetOpen.value = false
   }
 }, { flush: 'sync' })
 onUnmounted(() => {
+  document.removeEventListener('visibilitychange', refreshModeOnReturn)
   cancelSizeRequest()
   mounted = false
 })
@@ -145,67 +189,87 @@ function setPending(value: PendingOrder | null) {
   pending.value = value
   writePending(key, value)
 }
+
+function quoteIsFresh() {
+  return positive(props.price) && props.quoteTime > 0 && props.quoteEnvironment === props.environment &&
+    Math.abs(Date.now() - props.quoteTime) < 60_000
+}
+const canUseQuote = ref(false)
+watch([() => props.quoteTime, () => props.price, () => props.quoteEnvironment, () => props.environment], (_, __, cleanup) => {
+  canUseQuote.value = quoteIsFresh()
+  if (!canUseQuote.value) return
+  const timer = setTimeout(() => { canUseQuote.value = false }, Math.max(0, props.quoteTime + 60_000 - Date.now()))
+  cleanup(() => clearTimeout(timer))
+}, { immediate: true })
+function limitPriceFromQuote() {
+  if (futures.value && type.value === 'LIMIT' && quoteIsFresh()) limit.value = props.price
+}
+
 function checkQuote() {
-  if (
-    !props.price ||
-    !props.quoteTime ||
-    props.quoteEnvironment !== props.session?.environment ||
-    Math.abs(Date.now() - props.quoteTime) > 60_000
-  ) {
+  if (props.session?.environment !== props.environment || !quoteIsFresh()) {
     failure.value = '请刷新当前账户环境的行情后再下单。'
     return false
   }
   return true
 }
-async function prepare() {
-  if (!props.active) return
+function canPreviewDirection(direction: ManualDirection) {
+  if (!futures.value || !props.active || preview.value || inFlight.value || calculating.value || pending.value) return false
+  if (!props.session) return true
+  if (!mode.value || awaitingFunds.value || inputIssue.value || directionIssue(direction) || !canUseQuote.value) return false
+  if (type.value === 'LIMIT' && !positive(limit.value)) return false
+  if (!positive(openingAmount.value)) return false
+  if (sizeMode.value === 'quantity') return openingMarginFor(direction) != null
+  return isAppLeverage(effectiveLeverage.value, maxLeverage.value)
+}
+function beginPreview() {
+  if (!props.active || preview.value || calculating.value || inFlight.value || pending.value) return
   failure.value = ''
   result.value = undefined
   if (!props.session) {
     emit('connect')
     return
   }
-  if (awaitingFunds.value || sizeIssue.value) return
-  const setLeverage = futures.value && !closing.value && leverage.value != null
-  if (setLeverage && !isAppLeverage(leverage.value, maxLeverage.value)) {
-    failure.value = maxLeverage.value ? '杠杆倍数须为 1 至 ' + maxLeverage.value + ' 的整数。' : '杠杆倍数须为正整数。'
-    return
-  }
-  if (inFlight.value || calculating.value || pending.value || !checkQuote()) return
-  const amount = openingAmount.value
-  if (
-    !positive(moneyMode.value ? amount : quantity.value) ||
-    (futures.value && type.value === 'LIMIT' && !positive(limit.value))
-  ) {
-    failure.value = '请填写大于零的十进制数量或金额，并检查限价。'
-    return
-  }
-  const shared = {
-    symbol: props.symbol,
-    clientOrderId: createClientOrderId(),
-    environment: props.session.environment,
-  }
+  if (!checkQuote()) return
   previewTime.value = Date.now()
   previewPrice.value = props.price
+  return { symbol: props.symbol, clientOrderId: createClientOrderId(), environment: props.session.environment }
+}
+function prepare() {
+  if (futures.value) return
+  const shared = beginPreview()
+  if (!shared) return
+  if (!positive(quantity.value)) {
+    failure.value = '请输入大于零的买入金额。'
+    return
+  }
+  preview.value = { kind: 'spot', input: { ...shared, quoteOrderQty: quantity.value } }
+}
+
+async function previewDirection(direction: ManualDirection) {
+  if (!futures.value) return
+  const shared = beginPreview()
+  if (!shared || !mode.value || !canPreviewDirection(direction)) return
+  const action = manualOpeningDirection(mode.value, direction)
+  const amount = openingAmount.value
+  const multiple = effectiveLeverage.value
   let sizing: ManualOrderSize | undefined
-  const multiple = leverage.value ?? currentLeverage.value
-  if (moneyMode.value && sizeMode.value !== 'quantity') {
-    if (!multiple || !isAppLeverage(multiple, maxLeverage.value)) {
-      failure.value = '请填写有效的合约杠杆倍数，以便换算下单数量。'
-      return
-    }
+  if (sizeMode.value !== 'quantity') {
+    if (!multiple) return
     const controller = new AbortController()
     sizeRequest = controller
     calculating.value = true
     try {
-      sizing = await getManualOrderSize(props.token, { symbol: shared.symbol, environment: shared.environment,
-        side: side.value, positionSide: position.value,
+      sizing = await getManualOrderSize(props.token, {
+        symbol: shared.symbol, environment: shared.environment, side: action.side, positionSide: action.positionSide,
         type: type.value, mode: sizeMode.value, amount, leverage: String(multiple),
-        price: type.value === 'LIMIT' ? limit.value : previewPrice.value }, controller.signal)
+        price: type.value === 'LIMIT' ? limit.value : previewPrice.value,
+      }, controller.signal)
       if (controller.signal.aborted) return
-      if (sizing.symbol !== shared.symbol || sizing.environment !== shared.environment || !positive(sizing.quantity))
-        throw Error('无法确认该交易对的下单数量。')
-      const issue = insufficientFunds(estimate({ margin: Number(sizing.margin) }))
+      if (sizing.symbol !== shared.symbol || sizing.environment !== shared.environment || !positive(sizing.quantity) || !positive(sizing.margin))
+        throw Error('无法确认该交易对的开仓金额或数量。')
+      const margin = estimateOpeningMargin({ margin: Number(sizing.margin) }, { symbol: shared.symbol, ...action },
+        props.positions, orderPrice.value, multiple)
+      const issue = insufficientFunds(margin)
       if (issue) throw Error(issue)
     } catch (cause) {
       if (!controller.signal.aborted) {
@@ -217,29 +281,16 @@ async function prepare() {
       if (sizeRequest === controller) { sizeRequest = undefined; calculating.value = false }
     }
   }
-  if (opening.value && (awaitingFunds.value || sizeIssue.value)) return
-  if (opening.value && sizeMode.value === 'quantity' && estimate({ quantity: Number(quantity.value) }) == null) {
-    failure.value = '请先确认交易对价格和杠杆倍数，以核对所需保证金。'
-    return
+  if (!canPreviewDirection(direction) || !checkQuote()) return
+  preview.value = {
+    kind: 'futures', direction, accountLeverage: currentLeverage.value,
+    sizing, percent: sizing && sizeMode.value === 'equityPercent' ? amount : undefined,
+    input: {
+      ...shared, ...action, type: type.value, quantity: sizing?.quantity ?? quantity.value,
+      ...(sizing || leverage.value != null ? { leverage: multiple } : {}),
+      ...(type.value === 'LIMIT' ? { price: limit.value } : {}),
+    },
   }
-  preview.value = futures.value
-    ? {
-        kind: 'futures',
-        accountLeverage: currentLeverage.value,
-        sizing, percent: sizing && sizeMode.value === 'equityPercent' ? amount : undefined,
-        closing: closing.value,
-        input: {
-          ...shared,
-          side: side.value,
-          positionSide: position.value,
-          type: type.value,
-          quantity: sizing?.quantity ?? quantity.value,
-          ...(sizing || setLeverage ? { leverage: multiple } : {}),
-          ...(type.value === 'LIMIT' ? { price: limit.value } : {}),
-          ...(position.value === 'BOTH' && reduce.value ? { reduceOnly: true } : {}),
-        },
-      }
-    : { kind: 'spot', input: { ...shared, quoteOrderQty: quantity.value } }
 }
 async function confirm() {
   const order = preview.value
@@ -250,7 +301,7 @@ async function confirm() {
     failure.value = '订单预览已过期，请重新核对。'
     return
   }
-  if (order.kind === 'futures' && !order.closing) {
+  if (order.kind === 'futures') {
     const required = estimateOpeningMargin({ quantity: Number(order.input.quantity) }, order.input,
       props.positions, Number(order.input.price ?? props.price), order.input.leverage ?? order.accountLeverage)
     const issue = insufficientFunds(required)
@@ -318,122 +369,90 @@ function positionName(value: string) {
         {{ environment === 'live' ? '实盘' : '测试网' }}
       </span>
     </div>
-    <form class="ticket-form" @submit.prevent="prepare">
-      <div v-if="futures" class="segmented" aria-label="订单方向">
-        <button
-          type="button"
-          :aria-pressed="side === 'BUY'"
-          :class="{ buy: side === 'BUY' }"
-          @click="side = 'BUY'"
-        >
-          买入
-        </button>
-        <button
-          type="button"
-          :aria-pressed="side === 'SELL'"
-          :class="{ sell: side === 'SELL' }"
-          @click="side = 'SELL'"
-        >
-          卖出
-        </button>
-      </div>
-      <div v-if="futures" class="two-fields">
-        <label class="field">
-          <span>订单类型</span>
-          <select v-model="type">
-            <option value="MARKET">市价单</option>
-            <option value="LIMIT">限价单（GTC）</option>
-          </select>
-        </label>
-        <label class="field">
-          <span>账户持仓模式</span>
-          <select v-model="position">
-            <option value="BOTH">单向持仓</option>
-            <option value="LONG">双向 · 多仓</option>
-            <option value="SHORT">双向 · 空仓</option>
-          </select>
-        </label>
-      </div>
-      <label v-if="opening" class="field">
-        <span>开仓方式</span>
-        <select v-model="sizeMode">
-          <option value="margin">固定保证金</option>
-          <option value="equityPercent">按总权益百分比</option>
-          <option value="quantity">直接输入合约数量</option>
-        </select>
-      </label>
-      <OpeningBalance v-if="opening" :funds="funds" :shortcuts="sizeMode === 'margin'"
-        @select="selectMargin" @refresh="emit('refresh')" @connect="emit('connect')">
-        <label class="field">
-          <span>{{ sizeMode === 'margin' ? '本单保证金' : sizeMode === 'equityPercent' ? '占合约总权益比例' : '下单数量' }}</span>
-          <span class="input-unit">
-            <input v-if="sizeMode === 'margin'" v-model.trim="marginAmount" inputmode="decimal" placeholder="输入保证金"
-              :required="!!session" :aria-invalid="!!sizeIssue" :aria-describedby="sizeIssue ? 'manual-size-issue' : undefined" />
-            <input v-else-if="sizeMode === 'equityPercent'" v-model.trim="equityPercent" inputmode="decimal" placeholder="输入比例"
-              :required="!!session" :aria-invalid="!!sizeIssue" :aria-describedby="sizeIssue ? 'manual-size-issue' : undefined" />
-            <input v-else v-model.trim="quantity" inputmode="decimal" placeholder="输入合约数量"
-              :required="!!session" :aria-invalid="!!sizeIssue" :aria-describedby="sizeIssue ? 'manual-size-issue' : undefined" />
-            <b>{{ sizeMode === 'margin' ? 'USDT' : sizeMode === 'equityPercent' ? '%' : base }}</b>
+    <form class="ticket-form" :aria-busy="inFlight || calculating" :aria-describedby="formIssue ? leveragePanelId + '-issue' : undefined" @submit.prevent="prepare">
+      <template v-if="futures">
+        <div class="manual-toolbar">
+          <span v-if="session && !modeError" class="position-mode" role="status">
+            {{ mode === 'hedge' ? '双向持仓' : mode === 'oneWay' ? '单向持仓' : '读取持仓模式中…' }}
           </span>
-          <small v-if="sizeMode === 'equityPercent'">以预览时的合约总权益计算保证金，含未实现盈亏。</small>
+          <button type="button" class="setting-chip leverage-chip"
+            :aria-expanded="leverageExpanded" :aria-controls="leveragePanelId"
+            :aria-label="effectiveLeverage == null ? '合约杠杆，沿用账户设置' : '合约杠杆 ' + effectiveLeverage + ' 倍'" @click="leverageExpanded = !leverageExpanded">
+            {{ effectiveLeverage != null ? effectiveLeverage + '×' : '账户杠杆' }}
+            <span class="chip-caret" aria-hidden="true"></span>
+          </button>
+          <span class="ticket-symbol">{{ symbol }}</span>
+        </div>
+        <p v-if="modeError" class="notice warning" role="status">
+          持仓模式读取失败。{{ modeError }}
+          <button type="button" class="text-button" @click="modeRefresh++">重试</button>
+        </p>
+        <div v-show="leverageExpanded" :id="leveragePanelId" class="leverage-panel">
+          <LeverageControl v-model="leverage" label="合约杠杆倍数" :max="maxLeverage"
+            :fallback="currentLeverage" :placeholder="currentLeverage ? String(currentLeverage) : '沿用'" />
+          <p v-if="leverageLoading" class="ticket-hint" role="status">正在读取账户杠杆…</p>
+        </div>
+        <p v-if="leverageError" class="notice warning" role="status">{{ leverageError }}
+          <button type="button" class="text-button" @click="refreshLeverage">重读杠杆档位</button>
+        </p>
+
+        <div class="manual-order-types" role="group" aria-label="订单类型">
+          <button type="button" :aria-pressed="type === 'LIMIT'" @click="type = 'LIMIT'">限价</button>
+          <button type="button" :aria-pressed="type === 'MARKET'" @click="type = 'MARKET'">市价</button>
+          <span v-if="type === 'LIMIT'" class="time-in-force" title="订单持续有效，直至成交或取消">有效期 GTC</span>
+        </div>
+        <div v-if="type === 'LIMIT'" class="limit-row">
+          <label class="field">
+            <span>委托价格</span>
+            <span class="input-unit"><input v-model.trim="limit" inputmode="decimal" placeholder="输入限价" :required="!!session" /><b>USDT</b></span>
+          </label>
+          <button type="button" class="btn quote-fill" :disabled="!canUseQuote" @click="limitPriceFromQuote">最新价</button>
+        </div>
+        <div v-else class="market-execution"><span>委托价格</span><span>按市场价格成交</span></div>
+        <OpeningBalance :funds="funds" :slider="sizeMode === 'margin'"
+          :selected-amount="Number(marginAmount)" @select="selectMargin" @refresh="emit('refresh')" @connect="emit('connect')">
+          <div class="field amount-field">
+            <div class="amount-heading">
+              <label :for="leveragePanelId + '-amount'">{{ sizeMode === 'margin' ? '本单保证金' : sizeMode === 'equityPercent' ? '占总权益比例' : '委托数量' }}</label>
+              <select v-if="type === 'LIMIT'" v-model="limitSizeMode" class="sizing-select" aria-label="开仓方式">
+                <option value="margin">固定保证金</option>
+                <option value="equityPercent">按总权益百分比</option>
+                <option value="quantity">合约数量</option>
+              </select>
+            </div>
+            <span class="input-unit">
+              <input v-if="sizeMode === 'margin'" :id="leveragePanelId + '-amount'" v-model.trim="marginAmount" inputmode="decimal" placeholder="输入保证金" />
+              <input v-else-if="sizeMode === 'equityPercent'" :id="leveragePanelId + '-amount'" v-model.trim="equityPercent" inputmode="decimal" placeholder="输入比例" />
+              <input v-else :id="leveragePanelId + '-amount'" v-model.trim="quantity" inputmode="decimal" placeholder="输入数量" />
+              <b>{{ sizeMode === 'margin' ? 'USDT' : sizeMode === 'equityPercent' ? '%' : base }}</b>
+            </span>
+          </div>
+        </OpeningBalance>
+        <p v-if="formIssue" :id="leveragePanelId + '-issue'" class="sizing-error" role="status">{{ formIssue }}</p>
+        <p v-else-if="calculating" class="ticket-hint" role="status">正在计算下单数量…</p>
+        <div class="direction-actions">
+          <div v-for="direction in (['LONG', 'SHORT'] as const)" :key="direction" class="direction-action">
+            <button type="button" class="btn direction-button" :class="direction === 'LONG' ? 'buy' : 'sell'"
+              :disabled="!canPreviewDirection(direction)" @click="previewDirection(direction)">
+              预览开{{ direction === 'LONG' ? '多' : '空' }}
+            </button>
+            <span v-if="openingMarginFor(direction) != null" class="action-estimate">
+              预计保证金 <strong>{{ formatNumber(openingMarginFor(direction)) }} USDT</strong>
+            </span>
+            <small v-if="!formIssue && directionIssue(direction)" class="sizing-error">{{ directionIssue(direction) }}</small>
+          </div>
+        </div>
+      </template>
+      <template v-else>
+        <label class="field">
+          <span>买入金额</span>
+          <span class="input-unit"><input v-model.trim="quantity" inputmode="decimal" placeholder="0.00" :required="!!session" /><b>USDT</b></span>
         </label>
-        <p v-if="sizeIssue" id="manual-size-issue" class="sizing-error" role="status">{{ sizeIssue }}</p>
-      </OpeningBalance>
-      <label v-else class="field">
-        <span>{{ futures ? '下单数量' : '买入金额' }}</span>
-        <span class="input-unit">
-          <input
-            v-model.trim="quantity"
-            inputmode="decimal"
-            placeholder="0.00"
-            :required="!!session"
-          />
-          <b>{{ futures ? base : 'USDT' }}</b>
-        </span>
-      </label>
-      <label v-if="futures && closing" class="field">
-        <span>合约杠杆倍数</span>
-        <input disabled :value="currentLeverage ? '平仓沿用当前 ' + currentLeverage + ' 倍' : '平仓沿用账户当前杠杆'" />
-      </label>
-      <LeverageControl v-else-if="futures" v-model="leverage" label="合约杠杆倍数" :max="maxLeverage"
-        :fallback="currentLeverage" :placeholder="currentLeverage ? String(currentLeverage) : '沿用'"
-        :description="leverageHelp" />
-      <p v-if="futures && leverageError" class="notice warning" role="status">{{ leverageError }}
-        <button type="button" class="text-button" @click="refreshLeverage">重读杠杆档位</button>
-      </p>
-      <label v-if="futures && type === 'LIMIT'" class="field">
-        <span>限价</span>
-        <span class="input-unit">
-          <input
-            v-model.trim="limit"
-            inputmode="decimal"
-            placeholder="0.00"
-            :required="!!session"
-          />
-          <b>USDT</b>
-        </span>
-      </label>
-      <label v-if="futures && position === 'BOTH'" class="checkbox">
-        <input v-model="reduce" type="checkbox" aria-describedby="reduce-help" />
-        仅减仓
-      </label>
-      <p v-if="futures && position === 'BOTH'" id="reduce-help" class="ticket-hint">
-        勾选后，{{ side === 'BUY' ? '买入只平空仓' : '卖出只平多仓' }}。
-        例如已有 0.02 {{ base }} {{ side === 'BUY' ? '空仓' : '多仓' }}，{{ side === 'BUY' ? '买入' : '卖出' }}
-        0.01 {{ base }} 成交后，原仓剩余 0.01 {{ base }}。没有对应持仓时，订单无法成交。关闭仅减仓后，超出原仓的成交数量可能开出反向仓位。
-      </p>
-      <p v-else-if="futures" class="ticket-hint">
-        双向模式按持仓侧区分开平。当前订单将{{ position === 'LONG'
-          ? (side === 'BUY' ? '开多或加多仓' : '平多仓')
-          : (side === 'SELL' ? '开空或加空仓' : '平空仓') }}。
-      </p>
-      <p v-if="!futures" class="ticket-hint">
-        以可用 USDT 购买 {{ base }}，实际成交数量由撮合价格决定。
-      </p>
-      <button type="submit" class="btn primary submit-order"
-        :disabled="inFlight || calculating || !!pending || awaitingFunds || !!sizeIssue || (!!session && opening && !openingAmount)">
-        {{ !session ? '连接账户后下单' : calculating ? '正在计算数量…' : inFlight ? '正在处理…' : '预览订单' }}
-      </button>
+        <p class="ticket-hint">以可用 USDT 购买 {{ base }}，实际成交数量由撮合价格决定。</p>
+        <button type="submit" class="btn primary submit-order" :disabled="inFlight || calculating || !!pending">
+          {{ !session ? '连接账户后下单' : inFlight ? '正在处理…' : '预览订单' }}
+        </button>
+      </template>
     </form>
     <div v-if="pending && !inFlight" class="receipt warning" role="status">
       <strong>订单状态待核实</strong>
@@ -473,9 +492,9 @@ function positionName(value: string) {
           <div>
             <dt>方向 / 持仓</dt>
             <dd>
-              {{ preview.input.side === 'BUY' ? '买入' : '卖出' }} ·
-              {{ positionName(preview.input.positionSide)
-              }}{{ preview.input.reduceOnly ? ' · 仅减仓' : '' }}
+              开{{ preview.direction === 'LONG' ? '多' : '空' }}
+              · {{ preview.input.side === 'BUY' ? '买入' : '卖出' }} ·
+              {{ positionName(preview.input.positionSide) }}
             </dd>
           </div>
           <div>
@@ -499,7 +518,7 @@ function positionName(value: string) {
             <dd>{{ preview.input.leverage ? '设为 ' + preview.input.leverage + ' 倍'
               : preview.accountLeverage ? '沿用当前 ' + preview.accountLeverage + ' 倍' : '沿用交易对当前杠杆' }}</dd>
           </div>
-          <div v-if="previewLeverage && !preview.closing">
+          <div v-if="previewLeverage">
             <dt>按全额开仓估算保证金</dt>
             <dd>约 {{ formatNumber(previewNotional / previewLeverage) }} USDT</dd>
           </div>
@@ -536,11 +555,57 @@ function positionName(value: string) {
 </template>
 
 <style scoped>
+.manual-toolbar, .amount-heading { display: flex; align-items: center; gap: 8px; }
+.manual-toolbar { flex-wrap: wrap; }
+.position-mode { color: var(--muted); font-size: 12px; }
+.ticket-symbol { margin-left: auto; font-size: 12px; font-weight: 600; color: var(--muted); }
+.setting-chip {
+  min-height: 30px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f3f6f3;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.leverage-chip { display: inline-flex; align-items: center; gap: 8px; }
+.chip-caret { width: 6px; height: 6px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: translateY(-1px) rotate(45deg); }
+.leverage-chip[aria-expanded='true'] .chip-caret { transform: translateY(1px) rotate(225deg); }
+.leverage-panel { background: #f7f9f7; border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; }
+.manual-order-types { display: flex; align-items: center; gap: 20px; border-bottom: 1px solid var(--line); }
+.manual-order-types button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 5px 1px 8px;
+  margin-bottom: -1px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+.manual-order-types button[aria-pressed='true'] { border-bottom-color: var(--green); color: var(--green); }
+.time-in-force { margin-left: auto; font-size: 12px; color: var(--muted); }
+.limit-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; }
+.market-execution { display: flex; align-items: baseline; justify-content: space-between; font-size: 12px; color: var(--muted); }
+.amount-heading { justify-content: space-between; flex-wrap: wrap; }
+.amount-heading .sizing-select { width: auto; height: 26px; padding: 0 4px; border-color: transparent; color: var(--green); font-size: 12px; font-weight: 600; cursor: pointer; }
+.amount-heading .sizing-select:hover { background: #f1f6f1; }
+.direction-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.direction-action { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.direction-button { width: 100%; min-height: 40px; color: white; }
+.direction-button.buy { background: var(--green); border-color: var(--green); }
+.direction-button.sell { background: #a4463b; border-color: #a4463b; }
+.direction-button.buy:hover:not(:disabled) { background: #104e3d; border-color: #104e3d; }
+.direction-button.sell:hover:not(:disabled) { background: #87392f; border-color: #87392f; }
+.action-estimate { font-size: 12px; color: var(--muted); }
+.action-estimate strong { color: var(--ink); font-variant-numeric: tabular-nums; }
 .sizing-error {
   margin: 0;
   color: #943f2d;
   font-size: 12px;
   line-height: 1.5;
 }
-.field input[aria-invalid='true'] { border-color: #b55e47; }
 </style>

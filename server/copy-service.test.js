@@ -138,6 +138,7 @@ test('copy config validates the leader set and leverage, and an equivalent selec
     { portfolioIds: [] }, { portfolioIds: ['101', '101'] }, { portfolioIds: ['1X'] }, { portfolioIds: null },
     { leverage: null }, { leverage: undefined }, { leverage: '3' }, { leverage: 0 }, { leverage: 1.5 },
     { leverage: Number.MAX_SAFE_INTEGER + 1 }, { sizingMode: 'unknown' },
+    { manualPositionPolicy: 'adopt' }, { manualPositionPolicy: true }, { manualPositionPolicy: null },
     { sizingMode: 'equityPercent', amount: 101 }, { sizingMode: 'equityPercent', amount: 0 },
     { portfolioIds: undefined, portfolioId: '101', sizingMode: 'margin', leverage: null },
   ]) {
@@ -145,12 +146,15 @@ test('copy config validates the leader set and leverage, and an equivalent selec
     assert.equal(response.status, 400)
   }
   plan.sizingMode = 'equityPercent'
+  plan.manualPositionPolicy = 'add'
   const active = await json(service, 'copy', undefined, { ...begin, config: plan })
   assert.deepEqual(active.config.portfolioIds, ['101', '202'])
   assert.equal(active.config.leverage, 150)
   assert.equal(active.config.sizingMode, 'equityPercent')
+  assert.equal((await json(service, 'copy')).config.manualPositionPolicy, 'add')
   assert.equal((await json(service, 'copy', undefined, { ...begin, config: { ...plan, portfolioIds: ['202', '101'] } })).enabled, true)
   assert.equal((await service.fetch(packet('copy', undefined, { ...begin, config: { ...plan, leverage: 6 } }))).status, 409)
+  assert.equal((await service.fetch(packet('copy', undefined, { ...begin, config: { ...plan, manualPositionPolicy: 'skip' } }))).status, 409)
 })
 
 test('old stored in-flight orders retain their sole leader and exchange leverage after recovery', async t => {
@@ -168,6 +172,7 @@ test('old stored in-flight orders retain their sole leader and exchange leverage
   assert.deepEqual(restored.config.portfolioIds, ['101'])
   assert.equal(restored.config.leverage, null)
   assert.equal(restored.config.sizingMode, 'notional')
+  assert.equal(restored.config.manualPositionPolicy, 'skip')
   assert.equal(restored.pending.portfolioId, '101')
   assert.equal((await json(service, 'copy', undefined, { ...begin, config: restored.config })).enabled, true)
   await tick()

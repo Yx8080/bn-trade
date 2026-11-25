@@ -1,6 +1,15 @@
-import type { OrderInput, Position } from './futures'
+import type { FuturesPositionMode, OrderInput, Position } from './futures'
 
 export type OpeningSize = { margin: number } | { quantity: number }
+export type ManualDirection = 'LONG' | 'SHORT'
+
+export function manualOpeningDirection(mode: FuturesPositionMode, direction: ManualDirection):
+  Pick<OrderInput, 'side' | 'positionSide'> {
+  return {
+    side: direction === 'LONG' ? 'BUY' : 'SELL',
+    positionSide: mode === 'hedge' ? direction : 'BOTH',
+  }
+}
 
 export function estimateOpeningMargin(
   size: OpeningSize,

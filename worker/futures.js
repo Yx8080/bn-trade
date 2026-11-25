@@ -8,6 +8,7 @@ import { symbolLeverageInfo } from './futures-leverage.js'
 import { lookupPlatformOrder, submitPlatformOrder } from './platform-orders.js'
 import { fundedOpeningNotional, getFuturesEquity } from './futures-equity.js'
 import { decimal, scale, sizeMarketOrder, symbolRules, units } from './futures-sizing.js'
+import { closePosition, requireFuturesSymbol } from './futures-close.js'
 
 export const futuresBases = { testnet: 'https://demo-fapi.binance.com', live: 'https://fapi.binance.com' }
 const positionSides = ['BOTH', 'LONG', 'SHORT']
@@ -39,6 +40,12 @@ async function account(env, base, user, environment) {
       ? [{ asset, walletBalance, availableBalance }] : []
   })
   return { name: user.name, environment, balances, positions: futuresPositions(risk) }
+}
+
+export async function getFuturesPositionMode(env, base, user) {
+  const config = await binanceRequest(env, base, '/fapi/v1/positionSide/dual', { credentials: user })
+  if (typeof config?.dualSidePosition !== 'boolean') throw invalidData()
+  return config.dualSidePosition ? 'hedge' : 'oneWay'
 }
 
 export function futuresPositions(risk) {
@@ -118,7 +125,8 @@ async function route(request, env) {
   const methods = {
     '/api/futures/quote': ['GET'], '/api/futures/session': ['GET'],
     '/api/futures/account': ['GET'], '/api/futures/equity': ['GET'],
-    '/api/futures/order-size': ['GET'],
+    '/api/futures/position-mode': ['GET'], '/api/futures/order-size': ['GET'],
+    '/api/futures/close-position': ['GET', 'POST'],
     '/api/futures/leverage': ['GET'], '/api/futures/orders': ['GET', 'POST'],
   }[pathname]
   if (!methods) throw new ApiError(404, 'NOT_FOUND', '接口不存在。')
@@ -134,7 +142,11 @@ async function route(request, env) {
     return jsonResponse({ id: user.id, name: user.name, environment, ...(user.uid && { uid: user.uid }), ...(user.markets && { markets: user.markets }) })
   }
   if (!user.apiKey || !user.apiSecret) throw new ApiError(503, 'FUTURES_NOT_CONFIGURED', '此账户尚未配置合约密钥。')
+  if (pathname === '/api/futures/close-position') return closePosition(request, env, base, user, environment)
   if (pathname === '/api/futures/account') return jsonResponse(await account(env, base, user, environment))
+  if (pathname === '/api/futures/position-mode') {
+    return jsonResponse({ environment, mode: await getFuturesPositionMode(env, base, user) })
+  }
   if (pathname === '/api/futures/equity') return jsonResponse(await getFuturesEquity(env, base, user))
   if (pathname === '/api/futures/order-size') return jsonResponse(await previewOrderSize(env, base, user, searchParams, environment))
   if (pathname === '/api/futures/leverage') {
@@ -143,7 +155,7 @@ async function route(request, env) {
   }
   const path = '/fapi/v1/order'
   if (request.method === 'GET') {
-    const params = orderLookup(searchParams)
+    const params = orderLookup(searchParams, requireFuturesSymbol)
     const data = await binanceRequest(env, base, path, { credentials: user, params })
     return jsonResponse(lookupPlatformOrder(env, environment, user.id, 'futures', user.apiKey, data, params))
   }

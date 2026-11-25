@@ -7,12 +7,13 @@ export interface PendingOrder {
 
 const memory = new Map<string, PendingOrder>()
 
-export const pendingOrderKey = (owner: string | undefined, environment: Environment, market: 'futures' | 'spot') =>
+export const pendingOrderKey = (owner: string | undefined, environment: Environment, market: 'futures' | 'spot' | 'futures-close') =>
   'bn-trade:pending:' + JSON.stringify([owner, environment, market])
 
 export function restorePreviousPending(session: BoundSession) {
   if (!session.previousWorkspaceId || session.environment !== 'live') return
-  for (const market of session.markets) {
+  const scopes = [...session.markets, ...(session.markets.includes('futures') ? ['futures-close' as const] : [])]
+  for (const market of scopes) {
     const key = pendingOrderKey(session.id, session.environment, market)
     const previousKey = pendingOrderKey(session.previousWorkspaceId, session.environment, market)
     const previous = readPending(previousKey)

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import timers from 'node:timers/promises'
 import { createCopyExchange } from './copy-exchange.js'
+import { runCopyTick } from './copy-engine.js'
 
 const user = { id: 'test', apiKey: 'unit-test', apiSecret: 'unit-test-secret' }
 const id = '5075281354358777856'
@@ -12,9 +13,9 @@ const market = { symbol: 'BTCUSDT', status: 'TRADING', quoteAsset: 'USDT', order
   { filterType: 'MIN_NOTIONAL', notional: '5' },
 ] }
 
-function exchange(fetchBinance) {
+function exchange(fetchBinance, lease = {}) {
   const reserved = new Set()
-  const orderStore = { reserve(environment, market, userId, id) {
+  const orderStore = { ...lease, reserve(environment, market, userId, id) {
     const key = [environment, market, userId, id].join('/')
     if (reserved.has(key)) return false
     reserved.add(key)
@@ -76,14 +77,15 @@ test('positions confirms actual account mode and preserves the signed direction'
     assert.equal(url.pathname, '/fapi/v3/positionRisk')
     positionCalls++
     return Response.json([{ symbol: 'BTCUSDT', positionSide: 'BOTH', positionAmt: '-0.01',
-      entryPrice: '60001.5', markPrice: '60101.5', unRealizedProfit: '-1' },
+      entryPrice: '60001.5', markPrice: '60101.5', unRealizedProfit: '-1', updateTime: 1800000000000 },
     { symbol: 'ETHUSDT', positionSide: 'BOTH', positionAmt: '0' }])
   })
   await assert.rejects(client.positions(), { code: 'COPY_ONE_WAY_REQUIRED' })
   assert.equal(positionCalls, 0)
   hedging = false
   assert.deepEqual(await client.positions(), [
-    { symbol: 'BTCUSDT', direction: 'SHORT', quantity: 0.01, entryPrice: 60001.5, markPrice: 60101.5, unrealizedPnl: -1 },
+    { symbol: 'BTCUSDT', direction: 'SHORT', quantity: 0.01, entryPrice: 60001.5, markPrice: 60101.5,
+      unrealizedPnl: -1, quantityText: '-0.01', entryPriceText: '60001.5', updateTime: 1800000000000 },
   ])
 })
 
@@ -145,6 +147,98 @@ test('network failures, duplicate responses and incomplete receipts remain looku
     await assert.rejects(client.open('BTCUSDT', 'LONG', '25', 'intent'), e => Boolean(e.definite) === definite)
     assert.equal(attempts, 1)
   }
+})
+
+test('shared-position exits recheck the signed position and most recent order under the symbol lease', async () => {
+  const actual = { quantityText: '-0.13', entryPriceText: '100', updateTime: 1800000000000 }
+  let snapshot = { symbol: 'BTCUSDT', positionSide: 'BOTH', positionAmt: actual.quantityText,
+    entryPrice: actual.entryPriceText, updateTime: actual.updateTime }
+  let lastFill = { symbol: 'BTCUSDT', positionSide: 'BOTH', orderId: exchangeId }
+  let orders = 0
+  const mock = orderMock(params => {
+    orders++
+    assert.equal(params.get('quantity'), '0.03')
+    assert.equal(params.get('reduceOnly'), 'true')
+    assert.equal(params.get('side'), 'BUY')
+    return receipt(params)
+  })
+  const client = exchange((url, init) => {
+    if (url.pathname === '/fapi/v3/positionRisk') return Response.json([snapshot])
+    if (url.pathname === '/fapi/v1/userTrades') return Response.json([lastFill])
+    return mock(url, init)
+  })
+  const close = clientId => client.close('BTCUSDT', 'SHORT', 0.03, clientId, { actual, lastOrderId: exchangeId })
+  await close('copy-slice')
+  lastFill = { ...lastFill, orderId: '99' }
+  await assert.rejects(close('replaced'), { code: 'SHARED_POSITION_CHANGED', definite: true })
+  lastFill = { ...lastFill, orderId: exchangeId }
+  snapshot = { ...snapshot, updateTime: actual.updateTime + 1 }
+  await assert.rejects(close('changed'), { code: 'SHARED_POSITION_CHANGED', definite: true })
+  assert.equal(orders, 1)
+})
+
+test('a first signal skips an intervening manual fill under the symbol lease before any leverage or order change', async () => {
+  const now = 1_800_000_001_000
+  const state = { enabled: true, config: { portfolioIds: [id], amount: 10, leverage: 2,
+    sizingMode: 'margin', repeat: 'first', maxEntries: 1, maxPositions: 1, stopLoss: 5 },
+    since: now - 1000, positions: [], events: [], pending: null }
+  let claimed = false
+  let rechecked = false
+  let writes = 0
+  const mock = orderMock(params => { writes++; return receipt(params) })
+  const client = exchange((url, init) => {
+    if (url.pathname.endsWith('/dual')) return Response.json({ dualSidePosition: false })
+    if (url.pathname.endsWith('/positionRisk')) {
+      if (!url.searchParams.has('symbol')) return Response.json([])
+      assert.equal(url.searchParams.get('symbol'), 'BTCUSDT')
+      assert.equal(claimed, true)
+      rechecked = true
+      return Response.json([{ symbol: 'BTCUSDT', positionSide: 'BOTH', positionAmt: '0.25', notional: '2.75' }])
+    }
+    if (url.pathname.endsWith('/leverage')) { writes++; return Response.json({ symbol: 'BTCUSDT', leverage: 2 }) }
+    return mock(url, init)
+  }, {
+    claimFuturesSymbol() { claimed = true; return true },
+    releaseFuturesSymbol() { claimed = false },
+  })
+  client.signals = async () => [{ id: 'first', symbol: 'BTCUSDT', direction: 'LONG', kind: 'open', time: now - 1 }]
+  await runCopyTick(state, client, () => {}, now)
+  assert.equal(rechecked, true)
+  assert.equal(claimed, false)
+  assert.equal(writes, 0)
+  assert.equal(state.pending, null)
+  assert.deepEqual(state.positions, [])
+  assert.match(state.error, /已有仓位/)
+})
+
+test('first opens require a one-way, verifiably flat response for the exact requested symbol', async () => {
+  const flat = { symbol: 'BTCUSDT', positionSide: 'BOTH', positionAmt: '-0.000' }
+  let mode = false
+  let risk = []
+  let writes = 0
+  const mock = orderMock(params => { writes++; return receipt(params) })
+  const client = exchange((url, init) => {
+    if (url.pathname.endsWith('/dual')) return Response.json({ dualSidePosition: mode })
+    if (url.pathname.endsWith('/positionRisk')) return Response.json(risk)
+    return mock(url, init)
+  })
+  const open = key => client.open('BTCUSDT', 'LONG', 10, key, undefined, 'notional', { flat: true })
+  await open('omitted-zero')
+  risk = [flat]
+  await open('explicit-zero')
+  for (const [index, invalid] of [null, [null], [flat, flat], [{ ...flat, symbol: 'ETHUSDT' }],
+    [{ ...flat, positionSide: 'SHORT' }], [{ ...flat, positionAmt: null }]].entries()) {
+    risk = invalid
+    await assert.rejects(open('bad-risk-' + index), { code: 'INVALID_UPSTREAM_DATA', definite: true })
+  }
+  risk = [{ ...flat, positionAmt: '-0.001' }]
+  await assert.rejects(open('now-short'), { code: 'COPY_POSITION_NOT_FLAT', definite: true })
+  risk = []
+  mode = true
+  await assert.rejects(open('hedge-mode'), { code: 'COPY_ONE_WAY_REQUIRED', definite: true })
+  mode = 'false'
+  await assert.rejects(open('unknown-mode'), { code: 'INVALID_UPSTREAM_DATA', definite: true })
+  assert.equal(writes, 2)
 })
 
 test('a leveraged entry applies the confirmed symbol leverage before sending its fixed notional and leaves exits reduce-only', async () => {

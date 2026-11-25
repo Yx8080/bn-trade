@@ -98,97 +98,84 @@ watch(
     </div>
   </header>
   <div class="trading-grid" :class="{ 'futures-workspace': futures, 'spot-workspace': !futures }">
-    <div class="market-stack">
-      <section class="panel market-card">
-        <div class="ledger-heading">
-          <div class="section-title">
-            <div class="title-icon"><TrendCharts /></div>
-            <h2>市场行情</h2>
-          </div>
+    <section class="panel market-card">
+      <div class="ledger-heading">
+        <div class="section-title">
+          <div class="title-icon"><TrendCharts /></div>
+          <h2>市场行情</h2>
+        </div>
+        <button
+          class="icon-button"
+          title="刷新行情"
+          aria-label="刷新行情"
+          :disabled="loading"
+          @click="refresh++"
+        >
+          <Refresh />
+        </button>
+      </div>
+      <div class="market-body">
+        <form class="symbol-search" @submit.prevent="selectSymbol(symbolInput)">
+          <label class="field">
+            <span>USDT 交易对</span>
+            <input v-model="symbolInput" placeholder="BTCUSDT" spellcheck="false" required />
+          </label>
+          <button class="btn" type="submit">
+            <Search />
+            查询
+          </button>
+        </form>
+        <div class="symbol-picks">
           <button
-            class="icon-button"
-            title="刷新行情"
-            aria-label="刷新行情"
-            :disabled="loading"
-            @click="refresh++"
+            v-for="coin in ['BTC', 'ETH', 'SOL', 'BNB']"
+            :key="coin"
+            type="button"
+            :class="{ picked: coin === base }"
+            @click="selectSymbol(coin + 'USDT')"
           >
-            <Refresh />
+            {{ coin }}
           </button>
         </div>
-        <div class="market-body">
-          <form class="symbol-search" @submit.prevent="selectSymbol(symbolInput)">
-            <label class="field">
-              <span>USDT 交易对</span>
-              <input v-model="symbolInput" placeholder="BTCUSDT" spellcheck="false" required />
-            </label>
-            <button class="btn" type="submit">
-              <Search />
-              查询
-            </button>
-          </form>
-          <div class="symbol-picks">
-            <button
-              v-for="coin in ['BTC', 'ETH', 'SOL', 'BNB']"
-              :key="coin"
-              type="button"
-              :class="{ picked: coin === base }"
-              @click="selectSymbol(coin + 'USDT')"
-            >
-              {{ coin }}
-            </button>
+        <p v-if="symbolError" class="notice error" role="alert">{{ symbolError }}</p>
+        <div class="quote-board">
+          <div class="quote-title">
+            <strong>
+              {{ base }}
+              <small>/ USDT</small>
+            </strong>
+            <span>
+              {{ futures ? '永续合约' : '现货' }} · {{ environment === 'live' ? '实盘' : '测试网' }}
+            </span>
           </div>
-          <p v-if="symbolError" class="notice error" role="alert">{{ symbolError }}</p>
-          <div class="quote-board">
-            <div class="quote-title">
-              <strong>
-                {{ base }}
-                <small>/ USDT</small>
-              </strong>
-              <span>
-                {{ futures ? '永续合约' : '现货' }} · {{ environment === 'live' ? '实盘' : '测试网' }}
-              </span>
-            </div>
-            <div class="quote-label">最新价格</div>
-            <div class="quote-price">
-              {{ price ? formatNumber(Number(price)) : '—' }}
-              <small>USDT</small>
-            </div>
-            <div v-if="futures" class="quote-mark">
-              标记价格
-              <strong>{{ markPrice ? formatNumber(Number(markPrice)) : '—' }}</strong>
-            </div>
-            <div v-if="futures && lastTradeTime" class="quote-time">最新价更新时间 {{ formatTradeTime(lastTradeTime) }} UTC+8</div>
-            <div class="quote-time">
-              {{
-                lastQuote
-                  ? (futures ? '标记价时间 ' : '最新报价时间 ') + formatTradeTime(lastQuote) + ' UTC+8'
-                  : loading
-                    ? '正在获取行情…'
-                    : '等待行情'
-              }}
-            </div>
+          <div class="quote-label">最新价格</div>
+          <div class="quote-price">
+            {{ price ? formatNumber(Number(price)) : '—' }}
+            <small>USDT</small>
           </div>
-          <p v-if="quoteError" class="notice error" role="status">{{ quoteError }}</p>
-          <PositionPnlEstimate
-            v-if="futures"
-            :key="symbol"
-            :symbol="symbol"
-            :mark-price="quoteError ? '' : markPrice"
-          />
+          <div v-if="futures" class="quote-mark">
+            标记价格
+            <strong>{{ markPrice ? formatNumber(Number(markPrice)) : '—' }}</strong>
+          </div>
+          <div v-if="futures && lastTradeTime" class="quote-time">最新价更新时间 {{ formatTradeTime(lastTradeTime) }} UTC+8</div>
+          <div class="quote-time">
+            {{
+              lastQuote
+                ? (futures ? '标记价时间 ' : '最新报价时间 ') + formatTradeTime(lastQuote) + ' UTC+8'
+                : loading
+                  ? '正在获取行情…'
+                  : '等待行情'
+            }}
+          </div>
         </div>
-      </section>
-      <AccountOverview
-        :market="market"
-        :session="activeSession"
-        :account="account"
-        :spot-account="spotAccount"
-        :loading="loadingAccount"
-        :error="accountError"
-        :fetched-at="fetchedAt"
-        @connect="emit('connect')"
-        @refresh="refreshAccount"
-      />
-    </div>
+        <p v-if="quoteError" class="notice error" role="status">{{ quoteError }}</p>
+        <PositionPnlEstimate
+          v-if="futures"
+          :key="symbol"
+          :symbol="symbol"
+          :mark-price="quoteError ? '' : markPrice"
+        />
+      </div>
+    </section>
     <div :class="futures ? 'panel futures-actions' : 'spot-actions'">
       <template v-if="futures">
         <div class="ledger-heading">
@@ -200,24 +187,40 @@ watch(
           <button type="button" :aria-pressed="manual" @click="futuresTab = 'manual'">手动交易</button>
         </nav>
       </template>
-      <CopyTrading v-if="!manual" :entries="entries" :environment="environment" :session="activeSession" :token="token"
-        :funds="funds" v-model:draft="copyDraft" @connect="emit('connect')" @edit="emit('edit')" @refresh="refreshAccount" />
-      <OrderTicket v-if="manualVisited" v-show="manual"
-        :active="manual"
-        :market="market"
-        :environment="environment"
-        :symbol="symbol"
-        :price="price"
-        :quote-time="orderQuoteTime"
-        :quote-environment="quoteError ? '' : quoteSource"
-        :session="activeSession"
-        :token="token"
-        :funds="funds"
-        :positions="account?.positions ?? []"
-        @connect="emit('connect')"
-        @refresh="refreshAccount"
-        @ordered="refreshAccount"
-      />
+      <div :role="futures ? 'region' : undefined" :aria-label="futures ? '合约下单表单' : undefined">
+        <CopyTrading v-if="!manual" :entries="entries" :environment="environment" :session="activeSession" :token="token"
+          :funds="funds" v-model:draft="copyDraft" @connect="emit('connect')" @edit="emit('edit')" @refresh="refreshAccount" />
+        <OrderTicket v-if="manualVisited" v-show="manual"
+          :active="manual"
+          :market="market"
+          :environment="environment"
+          :symbol="symbol"
+          :price="price"
+          :quote-time="orderQuoteTime"
+          :quote-environment="quoteError ? '' : quoteSource"
+          :session="activeSession"
+          :token="token"
+          :funds="funds"
+          :positions="account?.positions ?? []"
+          @connect="emit('connect')"
+          @refresh="refreshAccount"
+          @ordered="refreshAccount"
+        />
+      </div>
     </div>
   </div>
+  <AccountOverview
+    :market="market"
+    :symbol="symbol"
+    :entries="entries"
+    :token="token"
+    :session="activeSession"
+    :account="account"
+    :spot-account="spotAccount"
+    :loading="loadingAccount"
+    :error="accountError"
+    :fetched-at="fetchedAt"
+    @connect="emit('connect')"
+    @refresh="refreshAccount"
+  />
 </template>

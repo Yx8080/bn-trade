@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 import timers from 'node:timers/promises'
 import worker from '../worker/index.js'
+import { isPlatformManualPosition } from './position-sources.js'
+import { futuresBases, getFuturesPositionMode } from '../worker/futures.js'
 import { fundedOpeningNotional } from '../worker/futures-equity.js'
 import { checkCopyLeverage } from '../worker/futures-leverage.js'
 import { decimal, scale, sizeMarketOrder, symbolRules, units } from '../worker/futures-sizing.js'
@@ -9,7 +11,6 @@ import {
   isPositiveDecimal, isUsdtSymbol, orderResult, requireSymbol, reserveOrder, submitFuturesOrder,
 } from '../worker/trading.js'
 
-const futuresBases = { live: 'https://fapi.binance.com', testnet: 'https://demo-fapi.binance.com' }
 const confirmedModes = new WeakMap()
 const maxSignalPages = 4
 
@@ -93,17 +94,19 @@ export function createCopyExchange(env, user, environment) {
     throw new ApiError(503, 'FUTURES_NOT_CONFIGURED', '此账户尚未配置合约密钥。')
   }
   const base = futuresBases[environment]
+  const hedgeMode = () => new ApiError(409, 'COPY_ONE_WAY_REQUIRED', '请将币安合约账户切换为单向持仓后再启动跟单。')
+
+  async function confirmOneWayMode() {
+    if (await getFuturesPositionMode(env, base, user) === 'hedge') throw hedgeMode()
+  }
 
   async function positions() {
     const credentials = { credentials: user }
     if (!confirmedModes.has(env)) confirmedModes.set(env, new WeakMap())
     const accounts = confirmedModes.get(env)
     const confirmed = accounts.get(user)
-    const hedgeMode = () => new ApiError(409, 'COPY_ONE_WAY_REQUIRED', '请将币安合约账户切换为单向持仓后再启动跟单。')
     if (confirmed?.base !== base || confirmed.until <= Date.now()) {
-      const mode = await binanceRequest(env, base, '/fapi/v1/positionSide/dual', credentials)
-      if (mode.dualSidePosition === true) throw hedgeMode()
-      if (mode.dualSidePosition !== false) throw invalidData()
+      await confirmOneWayMode()
       accounts.set(user, { base, until: Date.now() + 30_000 })
     }
     const risk = await binanceRequest(env, base, '/fapi/v3/positionRisk', credentials)
@@ -120,11 +123,42 @@ export function createCopyExchange(env, user, environment) {
       const markPrice = finiteField(row.markPrice)
       if (entryPrice <= 0 || markPrice <= 0) throw invalidData()
       return [{ symbol: row.symbol, direction: amount > 0 ? 'LONG' : 'SHORT', quantity: Math.abs(amount),
-        entryPrice, markPrice, unrealizedPnl: finiteField(row.unRealizedProfit) }]
+        entryPrice, markPrice, unrealizedPnl: finiteField(row.unRealizedProfit), updateTime: row.updateTime,
+        quantityText: row.positionAmt, entryPriceText: row.entryPrice }]
     })
   }
 
-  async function submit(symbol, direction, amount, clientOrderId, closing, leverage, sizingMode) {
+  // Recheck inside the same symbol lease used by manual orders. An intervening
+  // fill can invalidate ownership even when the new net quantity looks identical.
+  async function checkPosition(symbol, guard) {
+    const params = { symbol }
+    const [risk, recent] = await Promise.all([
+      binanceRequest(env, base, '/fapi/v3/positionRisk', { credentials: user, params }),
+      guard.lastOrderId && binanceRequest(env, base, '/fapi/v1/userTrades', { credentials: user, params: { ...params, limit: 1 } }),
+      guard.flat && confirmOneWayMode(),
+    ])
+    if (guard.flat) {
+      // V3 may omit a symbol when it has neither a position nor an open order.
+      if (!Array.isArray(risk) || risk.length > 1) throw invalidData()
+      if (!risk.length) return
+      const [row] = risk
+      if (row?.symbol !== symbol || row.positionSide !== 'BOTH' || !isDecimal(row.positionAmt)) throw invalidData()
+      if (!/^-?0+(?:\.0+)?$/.test(row.positionAmt)) {
+        throw new ApiError(409, 'COPY_POSITION_NOT_FLAT', symbol + ' 已有仓位，跳过本次首次跟单。')
+      }
+      return
+    }
+    const expected = guard.actual
+    const row = Array.isArray(risk) && risk.find(p => p.symbol === symbol && p.positionSide === 'BOTH')
+    if (!row || !Number.isSafeInteger(expected.updateTime) || expected.updateTime <= 0 || row.updateTime !== expected.updateTime
+      || row.positionAmt !== expected.quantityText || row.entryPrice !== expected.entryPriceText
+      || (guard.lastOrderId && (!Array.isArray(recent) || recent.length !== 1 || recent[0].symbol !== symbol
+        || recent[0].orderId !== guard.lastOrderId || recent[0].positionSide !== 'BOTH'))) {
+      throw new ApiError(409, 'SHARED_POSITION_CHANGED', symbol + ' 的账户仓位或最近成交已变化，无法确认跟单数量，本次未下单。')
+    }
+  }
+
+  async function submit(symbol, direction, amount, clientOrderId, closing, leverage, sizingMode, guard) {
     let params
     let checkExposure
     try {
@@ -165,7 +199,11 @@ export function createCopyExchange(env, user, environment) {
       throw error
     }
     try {
-      const result = await submitFuturesOrder(env, base, user, params, leverage, checkExposure)
+      const preflight = guard ? async () => {
+        if (checkExposure) await checkExposure()
+        await checkPosition(symbol, guard)
+      } : checkExposure
+      const result = await submitFuturesOrder(env, base, user, params, leverage, preflight)
       return orderResult(result, symbol, clientOrderId, params)
     } catch (error) {
       // A duplicate can refer to an accepted earlier submission. Unknown status and unrecognized gateway errors require lookup.
@@ -178,9 +216,10 @@ export function createCopyExchange(env, user, environment) {
   return {
     signals: (portfolioId, since, until) => readSignals(env, portfolioId, since, until),
     positions,
-    open: (symbol, direction, amount, id, leverage, sizingMode = 'notional') =>
-      submit(symbol, direction, amount, id, false, leverage, sizingMode),
-    close: (symbol, direction, quantity, id) => submit(symbol, direction, quantity, id, true),
+    isPlatformManualPosition: actual => isPlatformManualPosition(env, user, environment, actual),
+    open: (symbol, direction, amount, id, leverage, sizingMode = 'notional', guard) =>
+      submit(symbol, direction, amount, id, false, leverage, sizingMode, guard),
+    close: (symbol, direction, quantity, id, guard) => submit(symbol, direction, quantity, id, true, undefined, undefined, guard),
     async lookup(symbol, clientOrderId) {
       requireSymbol(symbol)
       if (!isClientOrderId(clientOrderId)) throw new ApiError(400, 'INVALID_ORDER_ID', '客户订单号无效。')

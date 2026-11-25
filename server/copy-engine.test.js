@@ -114,6 +114,125 @@ test('initial unmanaged and manually changed holdings are left untouched', async
   assert(f.state.events.some(e => e.message.includes('停止接管')))
 })
 
+test('only an opted-in same-direction holding with confirmed manual provenance can receive the first copy fill', async () => {
+  for (const [policy, direction, verdict, proofCalls] of [
+    [undefined, 'LONG', true, 0], ['skip', 'LONG', true, 0], ['add', 'SHORT', true, 0],
+    ['add', 'LONG', false, 1], ['add', 'LONG', Error('history unavailable'), 1],
+  ]) {
+    const f = fixture(policy === undefined ? {} : { manualPositionPolicy: policy })
+    const holding = { symbol: btc, direction, quantity: 3, entryPrice: 100, markPrice: 100, unrealizedPnl: 0 }
+    f.live.set(btc, holding)
+    const checked = []
+    f.exchange.isPlatformManualPosition = async existing => {
+      checked.push(existing)
+      if (verdict instanceof Error) throw verdict
+      return verdict
+    }
+    f.feed.push(signal(1), signal(2, btc, 'close'))
+    await f.tick(100)
+    assert.deepEqual(checked, proofCalls ? [holding] : [])
+    assert.deepEqual(f.orders, [])
+    assert.deepEqual(f.state.positions, [])
+    assert.equal(f.live.get(btc).quantity, 3)
+  }
+})
+
+test('overlapping signals add only the configured copy lots to a manual base and respect both caps', async () => {
+  const f = fixture({ manualPositionPolicy: 'add', maxPositions: 1, maxEntries: 2 })
+  f.live.set(btc, { symbol: btc, direction: 'LONG', quantity: 3, entryPrice: 100, markPrice: 100, unrealizedPnl: 0 })
+  f.exchange.isPlatformManualPosition = async p => p.symbol === btc && p.quantity === 3
+  f.feed.push(signal(1), signal(2, btc, 'open', 'LONG', '1'), signal(3), signal(4), signal(5, eth))
+  await f.tick(100)
+  await f.tick(200)
+  assert.deepEqual(f.orders.map(order => order.slice(0, 4)), [['open', btc, 'LONG', 100], ['open', btc, 'LONG', 100]])
+  assert.deepEqual(f.state.positions.map(p => [p.portfolioId, p.quantity, p.entries]), [[id, 2, 2]])
+  assert.equal(f.live.get(btc).quantity, 5)
+  f.feed.push(signal(250, btc, 'close'))
+  await f.tick(300)
+  assert.deepEqual(f.orders.at(-1).slice(0, 4), ['close', btc, 'LONG', 2])
+  assert.equal(f.live.get(btc).quantity, 3)
+  assert.deepEqual(f.state.positions, [])
+})
+
+test('shared-position unrealized PnL and stop loss use the strategy entry price and filled quantity in both directions', async () => {
+  for (const direction of ['LONG', 'SHORT']) {
+    const f = fixture({ manualPositionPolicy: 'add' })
+    const sign = direction === 'LONG' ? 1 : -1
+    const holding = { symbol: btc, direction, quantity: 3, entryPrice: 140, markPrice: 100, unrealizedPnl: -120 * sign }
+    f.live.set(btc, holding)
+    f.exchange.isPlatformManualPosition = async () => true
+    f.exchange.open = async (symbol, side, amount, key) => {
+      holding.quantity = 4
+      holding.entryPrice = 130
+      return ack('open', symbol, side, key, 1, 'FILLED', 100)
+    }
+    f.feed.push(signal(1, btc, 'open', direction))
+    await f.tick(100)
+    assert.equal(f.state.positions[0].entryPrice, 100)
+    assert.equal(f.state.positions[0].quantity, 1)
+    holding.markPrice = 100 + 2 * sign
+    holding.unrealizedPnl = 4 * (holding.markPrice - 130) * sign
+    await f.tick(200)
+    assert.equal(f.state.unrealized, 2)
+    assert.equal(f.orders.length, 0)
+    holding.markPrice = 100 - 5 * sign
+    holding.unrealizedPnl = 4 * (holding.markPrice - 130) * sign
+    await f.tick(300)
+    assert.deepEqual(f.orders.map(order => order.slice(0, 4)), [['close', btc, direction, 1]])
+    assert.equal(holding.quantity, 3)
+    assert.deepEqual(f.state.positions, [])
+  }
+})
+
+test('replaying a shared partial open and a partially filled exit after restart preserves exactly the original manual quantity', async () => {
+  const f = fixture({ manualPositionPolicy: 'add', repeat: 'first' })
+  const holding = { symbol: btc, direction: 'LONG', quantity: 2, entryPrice: 80, markPrice: 105, unrealizedPnl: 50 }
+  f.live.set(btc, holding)
+  f.exchange.isPlatformManualPosition = async p => p.quantity === 2
+  let originalId
+  let completed = false
+  const closeRequests = []
+  f.exchange.open = async (symbol, direction, amount, key) => {
+    assert.equal(originalId, undefined)
+    originalId = key
+    holding.quantity = 2.25
+    holding.entryPrice = (2 * 80 + 0.25 * 105) / 2.25
+    return ack('open', symbol, direction, key, 0.25, 'PARTIALLY_FILLED', 105)
+  }
+  f.exchange.lookup = async (symbol, key) => {
+    assert.equal(key, originalId)
+    return completed ? ack('open', symbol, 'LONG', key, 1, 'FILLED', 104)
+      : ack('open', symbol, 'LONG', key, 0.25, 'PARTIALLY_FILLED', 105)
+  }
+  f.exchange.close = async (symbol, direction, quantity, key) => {
+    closeRequests.push(quantity)
+    const first = closeRequests.length === 1
+    const filled = first ? 0.4 : quantity
+    holding.quantity -= filled
+    return ack('close', symbol, direction, key, filled, first ? 'EXPIRED' : 'FILLED', 105)
+  }
+
+  f.feed.push(signal(1))
+  await f.tick(100)
+  let state = structuredClone(f.snapshots.at(-1))
+  f.feed.push(signal(150, btc, 'close'))
+  await runCopyTick(state, f.exchange, f.save, start + 200)
+  assert.deepEqual([state.positions[0].quantity, state.positions[0].entries], [0.25, 1])
+  assert.deepEqual(closeRequests, [])
+  completed = true
+  holding.quantity = 3
+  holding.entryPrice = (2 * 80 + 104) / 3
+  await runCopyTick(state, f.exchange, f.save, start + 300)
+  assert.deepEqual(closeRequests, [1])
+  assert.deepEqual([state.positions[0].quantity, state.positions[0].entryPrice], [0.6, 104])
+  state = structuredClone(f.snapshots.at(-1))
+  await runCopyTick(state, f.exchange, f.save, start + 400)
+  assert.deepEqual(closeRequests, [1, 0.6])
+  assert.equal(holding.quantity, 2)
+  assert.deepEqual(state.positions, [])
+  assert.equal(state.pending, null)
+})
+
 test('a failed feed still checks stop loss and after recovery old entries are discarded; long downtime never opens stale trades', async () => {
   const f = fixture()
   f.feed.push(signal(1))

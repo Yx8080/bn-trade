@@ -130,13 +130,14 @@ function pnl(value: number) {
       <section class="panel">
         <div class="ledger-heading"><h2>合约持仓未实现盈亏</h2></div>
         <dl class="position-marks">
-          <div><dt>平台跟单</dt><dd>{{ !copyData ? '暂未读取' : !copyData.openCount ? '暂无持仓' : copyData.unrealized == null ? '等待估值' : pnl(copyData.unrealized) + ' USDT' }}</dd></div>
+          <div><dt>跟单份额估值</dt><dd>{{ !copyData ? '暂未读取' : !copyData.openCount ? '暂无持仓' : copyData.unrealized == null ? '等待估值' : pnl(copyData.unrealized) + ' USDT' }}</dd></div>
           <div v-for="row in valuation?.manualPositions" :key="row.symbol + row.positionSide">
             <dt>手动 · {{ row.symbol }} {{ row.positionSide === 'BOTH' ? '' : row.positionSide === 'LONG' ? '多' : '空' }}</dt>
             <dd>{{ row.unrealized == null ? '待核实' : pnl(row.unrealized) + ' USDT' }}</dd>
           </div>
           <div v-if="!valuation?.manualPositions.length"><dt>平台手动</dt><dd>{{ !valuation || valuation.valuationError ? '暂未取得估值' : '暂无可归属持仓' }}</dd></div>
         </dl>
+        <p class="pnl-note">手动和跟单同向合仓时，跟单浮盈和止损按跟单成交均价估算。已实现盈亏取币安按合仓均价结算的成交回执。</p>
         <p v-if="copyData?.openCount && copyData.unrealizedAt" class="pnl-note">跟单估值 {{ formatTradeTime(copyData.unrealizedAt) }} UTC+8</p>
         <p v-if="valuation?.manualPositions.length && valuation.valuationTime" class="pnl-note">手动估值 {{ formatTradeTime(valuation.valuationTime) }} UTC+8</p>
       </section>

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { getCopyPnl, getCopyStatus, getOtherTrades, getPlatformPnl, getPlatformValuation, updateCopyStatus } from '../src/futures.ts'
+import { getCopyPnl, getCopyStatus, getFuturesFills, getOtherTrades, getPlatformPnl, getPlatformValuation, getPositionSources, updateCopyStatus } from '../src/futures.ts'
 
 test('跟单盈亏按页和当前账户读取，保留不同结算币种与待结算状态', async t => {
   const page = {
@@ -27,7 +27,7 @@ test('跟单状态只读，启动与暂停带上当前环境和账户令牌', as
     return Response.json({ enabled: init.method === 'POST' && calls.length === 2,
       config: null, positions: [], events: [], lastCheck: null, error: '', pending: null })
   })
-  const config = { portfolioIds: ['123', '456'], leverage: 10, sizingMode: 'equityPercent', repeat: 'fixed', amount: 2, maxEntries: 2, maxPositions: 2, stopLoss: 5 }
+  const config = { portfolioIds: ['123', '456'], leverage: 10, sizingMode: 'equityPercent', repeat: 'fixed', manualPositionPolicy: 'add', amount: 2, maxEntries: 2, maxPositions: 2, stopLoss: 5 }
   const start = { action: 'start', environment: 'testnet', config }
   const pause = { action: 'pause', environment: 'testnet' }
   await getCopyStatus('mock-token')
@@ -54,4 +54,19 @@ test('平台手动账本、估值和交易所查询可独立读取，切换市�
   await getPlatformValuation('test-view')
   await assert.rejects(getOtherTrades('test-view', 'spot', 'ETHBTC'), /交易所暂不可用/)
   assert.deepEqual(urls, ['/api/platform/pnl?page=3', '/api/platform/valuation', '/api/futures/other-trades?market=spot&symbol=ETHBTC'])
+})
+
+test('合约账户的来源、全部成交和仅其他成交分别按当前账户请求', async t => {
+  const calls = []
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    assert.equal(init.method, 'GET')
+    assert.equal(init.headers.get('authorization'), 'Bearer demo-token')
+    calls.push(url)
+    return Response.json({})
+  })
+  await getPositionSources('demo-token')
+  await getFuturesFills('demo-token', 'ETHUSDT')
+  await getOtherTrades('demo-token', 'futures', 'ETHUSDT')
+  assert.deepEqual(calls, ['/api/futures/position-sources', '/api/futures/other-trades?market=futures&symbol=ETHUSDT&scope=all',
+    '/api/futures/other-trades?market=futures&symbol=ETHUSDT'])
 })

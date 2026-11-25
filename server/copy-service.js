@@ -57,11 +57,14 @@ function parseConfig(input) {
     throw new ApiError(400, 'INVALID_COPY_CONFIG', '按保证金开仓需要填写杠杆倍数。')
   if (sizingMode === 'equityPercent' && (!positive(input.amount) || input.amount > 100))
     throw new ApiError(400, 'INVALID_COPY_CONFIG', '每次使用的合约账户总权益比例须大于 0 且不超过 100%。')
+  const manualPositionPolicy = input.manualPositionPolicy === undefined ? 'skip' : input.manualPositionPolicy
+  if (!['skip', 'add'].includes(manualPositionPolicy))
+    throw new ApiError(400, 'INVALID_COPY_CONFIG', '请选择已有平台手动同向仓位时的处理方式。')
   if (!positive(input.amount) || !positive(input.stopLoss) || !count(input.maxPositions)
     || !['first', 'fixed'].includes(input.repeat) || !count(input.maxEntries)) {
     throw new ApiError(400, 'INVALID_COPY_CONFIG', '请检查每次开仓金额、仓位数、开仓次数和止损金额。')
   }
-  return { portfolioIds: [...portfolioIds].sort(), leverage: input.leverage ?? null, sizingMode, amount: input.amount, repeat: input.repeat,
+  return { portfolioIds: [...portfolioIds].sort(), leverage: input.leverage ?? null, sizingMode, amount: input.amount, repeat: input.repeat, manualPositionPolicy,
     maxEntries: input.repeat === 'first' ? 1 : input.maxEntries, maxPositions: input.maxPositions, stopLoss: input.stopLoss }
 }
 
@@ -195,7 +198,7 @@ export function createCopyService(env, exchangeFor = createCopyExchange) {
         if (url.pathname === '/api/futures/other-trades') {
           if (request.method !== 'GET') return jsonResponse({ message: '请求方法无效。' }, 405, { Allow: 'GET' })
           return jsonResponse(await otherTrades(env, user, environment, url.searchParams.get('market') ?? 'futures',
-            url.searchParams.get('symbol')))
+            url.searchParams.get('symbol'), url.searchParams.get('scope') ?? 'other'))
         }
         if (url.pathname === '/api/futures/copy-pnl') {
           if (request.method !== 'GET') return jsonResponse({ message: '请求方法无效。' }, 405, { Allow: 'GET' })

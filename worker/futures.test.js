@@ -90,6 +90,37 @@ test('account reports wallet, available balance and exchange-valued open positio
   })
 })
 
+test('current position mode is a signed read for the selected account and environment, including when it has no positions', async t => {
+  const upstream = t.mock.method(globalThis, 'fetch', (url, init) => {
+    assert.equal(init.method, 'GET')
+    assert.equal(url.pathname, '/fapi/v1/positionSide/dual')
+    if (url.origin === 'https://demo-fapi.binance.com') {
+      verifySignature(url, init, users[0])
+      return Response.json({ dualSidePosition: true })
+    }
+    assert.equal(url.origin, 'https://fapi.binance.com')
+    verifySignature(url, init, users[1])
+    return Response.json({ dualSidePosition: false })
+  })
+  assert.equal((await send('position-mode', null)).status, 401)
+  assert.equal((await send('position-mode', users[0], { dualSidePosition: false })).status, 405)
+  assert.equal(upstream.mock.callCount(), 0)
+  const hedge = await send('position-mode', users[0])
+  assert.equal(hedge.headers.get('Cache-Control'), 'no-store')
+  assert.deepEqual(await hedge.json(), { environment: 'testnet', mode: 'hedge' })
+  const oneWay = await send('position-mode', users[1], undefined, { ...config, BINANCE_FUTURES_ENV: 'live' })
+  assert.deepEqual(await oneWay.json(), { environment: 'live', mode: 'oneWay' })
+  assert.equal(upstream.mock.callCount(), 2)
+})
+
+test('missing or malformed exchange mode never falls back to a trading mode', async () => {
+  for (const payload of [{}, { dualSidePosition: 'false' }]) {
+    const response = await send('position-mode', users[0], undefined, { ...config, fetchBinance: () => Response.json(payload) })
+    assert.equal(response.status, 502)
+    assert.equal((await response.json()).code, 'INVALID_UPSTREAM_DATA')
+  }
+})
+
 test('signed limit orders retain exact decimals and 64-bit IDs, including concurrent duplicate submissions', async t => {
   const db = createLocalOrderDb(':memory:')
   t.after(() => db.close())
@@ -270,4 +301,121 @@ test('invalid or unconfigured orders do not reach Binance', async t => {
   }
   assert.equal((await send('orders', users[0], { ...order, environment: 'live' })).status, 409)
   assert.equal(upstream.mock.callCount(), 0)
+})
+
+function closeFixture(t) {
+  const db = createLocalOrderDb(':memory:')
+  t.after(() => db.close())
+  const input = { environment: 'testnet', symbol: 'BTCUSDC', positionSide: 'BOTH', direction: 'LONG',
+    expectedQuantity: '0.01200000', expectedUpdateTime: 731, quantity: '0.006', clientOrderId: 'position-close' }
+  const market = { symbol: input.symbol, quoteAsset: 'USDC', baseAsset: 'BTC', status: 'TRADING', orderTypes: ['MARKET'],
+    filters: [{ filterType: 'LOT_SIZE', minQty: '0.001', maxQty: '100', stepSize: '0.001' },
+      { filterType: 'MARKET_LOT_SIZE', minQty: '0.003', maxQty: '2', stepSize: '0.003' }] }
+  const row = { symbol: input.symbol, positionSide: 'BOTH', positionAmt: '0.012', updateTime: input.expectedUpdateTime }
+  const fixture = { risk: [row], orders: [], row, input, db }
+  fixture.env = { ...config, orderStore: db, fetchBinance: async (url, init) => {
+    assert.equal(url.origin, 'https://demo-fapi.binance.com')
+    if (url.pathname === '/fapi/v1/exchangeInfo') return Response.json({ symbols: [market] })
+    const params = verifySignature(url, init, users[0])
+    assert.equal(params.get('symbol'), input.symbol)
+    if (url.pathname === '/fapi/v3/positionRisk') {
+      assert.equal(init.method, 'GET')
+      if (fixture.beforeRisk) await fixture.beforeRisk()
+      return Response.json(fixture.risk)
+    }
+    assert.equal(url.pathname, '/fapi/v1/order')
+    if (init.method === 'POST') fixture.orders.push(Object.fromEntries(params))
+    if (init.method === 'POST' && fixture.orderError) return fixture.orderError
+    const placed = fixture.orders.at(-1)
+    return Response.json({ symbol: input.symbol, clientOrderId: placed.newClientOrderId, orderId: 70 + fixture.orders.length, status: 'FILLED',
+      side: placed.side, positionSide: placed.positionSide, type: 'MARKET', executedQty: placed.quantity, avgPrice: '50000', time: Date.now() })
+  } }
+  return fixture
+}
+
+test('row closes use exact market lots and can target either leg or the one-way net position', async t => {
+  const fixture = closeFixture(t)
+  const { env, row, input } = fixture
+  const rules = await send('close-position?symbol=BTCUSDC', users[0], undefined, env)
+  assert.deepEqual(await rules.json(), { symbol: 'BTCUSDC', environment: 'testnet', baseAsset: 'BTC', stepSize: '0.003', minQty: '0.003', maxQty: '2' })
+  for (const [leg, direction, quantity, side] of [
+    ['BOTH', 'LONG', '0.006', 'SELL'], ['BOTH', 'SHORT', '0.012', 'BUY'],
+    ['LONG', 'LONG', '0.012', 'SELL'], ['SHORT', 'SHORT', '0.003', 'BUY'],
+  ]) {
+    fixture.risk = leg === 'BOTH' ? [{ ...row, positionAmt: (direction === 'SHORT' ? '-' : '') + row.positionAmt }]
+      : [{ ...row, positionSide: 'LONG' }, { ...row, positionSide: 'SHORT', positionAmt: '-0.012' }]
+    const ticket = { ...input, positionSide: leg, direction, quantity, clientOrderId: leg + '-' + direction }
+    const response = await send('close-position', users[0], ticket, env)
+    const receipt = await response.json()
+    assert.equal(response.status, 201, JSON.stringify(receipt))
+    assert.equal(receipt.clientOrderId, ticket.clientOrderId)
+    const placed = fixture.orders.at(-1)
+    assert.equal(placed.type, 'MARKET')
+    assert.equal(placed.quantity, quantity)
+    assert.equal(placed.side, side)
+    assert.equal(placed.positionSide, leg)
+    assert.equal(placed.reduceOnly, leg === 'BOTH' ? 'true' : undefined)
+    assert.equal(placed.leverage, undefined)
+  }
+  assert.equal(fixture.orders.length, 4)
+})
+
+test('row closes reject changed position snapshots, quantities off the market lot and ambiguous positions before submission', async t => {
+  const fixture = closeFixture(t)
+  const { env, row, input } = fixture
+  let nextId = 0
+  const check = async (changes, risk, code) => {
+    fixture.risk = risk
+    const response = await send('close-position', users[0], { ...input, ...changes, clientOrderId: 'invalid-' + nextId++ }, env)
+    assert.equal((await response.json()).code, code)
+  }
+  for (const risk of [[], [{ ...row, positionAmt: '-0.012' }], [{ ...row, positionAmt: '0.009' }],
+    [{ ...row, positionAmt: '0' }], [{ ...row, updateTime: row.updateTime + 1 }], [{ ...row, positionSide: 'LONG' }],
+    [{ ...row, symbol: 'ETHUSDC' }]]) await check({}, risk, 'POSITION_CHANGED')
+  await check({ quantity: '0.006000000000000001' }, [row], 'INVALID_CLOSE_QUANTITY')
+  await check({ quantity: '0.00001' }, [row], 'INVALID_CLOSE_QUANTITY')
+  await check({ quantity: '3', expectedQuantity: '3' }, [{ ...row, positionAmt: '3' }], 'INVALID_CLOSE_QUANTITY')
+  await check({ quantity: '0.012000000000000001' }, [row], 'INVALID_CLOSE')
+  await check({ leverage: 10 }, [row], 'INVALID_CLOSE')
+  await check({ positionSide: 'SHORT' }, [row], 'INVALID_CLOSE')
+  await check({ environment: 'live' }, [row], 'ENVIRONMENT_CHANGED')
+  await check({}, [row, row], 'CLOSE_CHECK_UNAVAILABLE')
+  await check({}, {}, 'CLOSE_CHECK_UNAVAILABLE')
+  assert.equal((await send('close-position', null, input, env)).status, 401)
+  assert.deepEqual(fixture.orders, [])
+})
+
+test('row close rechecks inside the symbol lease and an uncertain receipt is queried using the original ID', async t => {
+  const fixture = closeFixture(t)
+  const { env, input } = fixture
+  const release = Promise.withResolvers()
+  const entered = Promise.withResolvers()
+  fixture.beforeRisk = async () => { entered.resolve(); await release.promise }
+  fixture.orderError = new Response('', { status: 504 })
+  const original = send('close-position', users[0], input, env)
+  await entered.promise
+  try {
+    const concurrent = await send('close-position', users[0], { ...input, clientOrderId: 'close-busy' }, env)
+    assert.equal((await concurrent.json()).code, 'FUTURES_SYMBOL_BUSY')
+  } finally {
+    release.resolve()
+  }
+  assert.equal((await (await original).json()).code, 'ORDER_UNKNOWN')
+  const duplicate = await send('close-position', users[0], input, env)
+  assert.equal((await duplicate.json()).code, 'ORDER_UNKNOWN')
+  assert.equal(fixture.orders.length, 1)
+  const lookup = await send('orders?symbol=BTCUSDC&clientOrderId=' + input.clientOrderId, users[0], undefined, env)
+  assert.equal((await lookup.json()).status, 'FILLED')
+  assert.equal(env.orderStore.platform.latest({ environment: 'testnet', userId: users[0].id,
+    market: 'futures', clientOrderId: input.clientOrderId }).status, 'FILLED')
+})
+
+test('a duplicate client ID response from the exchange keeps the close order available for reconciliation', async t => {
+  const fixture = closeFixture(t)
+  fixture.orderError = Response.json({ code: -4116, msg: 'Duplicated client order id' }, { status: 400 })
+  const response = await send('close-position', users[0], fixture.input, fixture.env)
+  assert.equal((await response.json()).code, 'ORDER_UNKNOWN')
+  const lookup = await send('orders?symbol=BTCUSDC&clientOrderId=' + fixture.input.clientOrderId, users[0], undefined, fixture.env)
+  assert.equal((await lookup.json()).status, 'FILLED')
+  assert.equal(fixture.orders.length, 1)
 })

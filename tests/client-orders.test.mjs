@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buySpot, lookupSpotOrder, submitOrder } from '../src/futures.ts'
-import { estimateOpeningMargin } from '../src/manual-opening.ts'
+import { buySpot, getFuturesPositionMode, lookupSpotOrder, selectEnvironment, submitOrder } from '../src/futures.ts'
+import { estimateOpeningMargin, manualOpeningDirection } from '../src/manual-opening.ts'
 import { amountFromBalance, availableUsdt } from '../src/opening-funds.ts'
 
 test('opening presets use spendable USDT and round fractional shares down to eight decimals', () => {
@@ -16,6 +16,50 @@ test('opening presets use spendable USDT and round fractional shares down to eig
   assert.equal(availableUsdt([{ asset: 'USDT', availableBalance: '0' }]), 0)
   assert.equal(amountFromBalance(-5, 100), 0)
   assert.equal(amountFromBalance(1e-8, 50), 0)
+})
+
+test('margin slider accepts every integer percentage and never rounds above the available balance', () => {
+  const available = 95.66886394
+  for (const [pct, amount] of [[0, 0], [1, 0.95668863], [37, 35.39747965], [75, 71.75164795], [99, 94.7121753]]) {
+    assert.equal(amountFromBalance(available, pct), amount)
+  }
+  for (const invalid of [-1, 12.5, 101, NaN, Infinity]) assert.equal(amountFromBalance(available, invalid), 0)
+  assert.equal(amountFromBalance(1.000000009, 100), 1)
+  assert.equal(amountFromBalance(1e-8, 100), 1e-8)
+})
+
+test('手动开多和开空按账户模式指定方向，均不发送仅减仓参数', () => {
+  const cases = [
+    ['oneWay', 'LONG',  { side: 'BUY',  positionSide: 'BOTH' }],
+    ['oneWay', 'SHORT', { side: 'SELL', positionSide: 'BOTH' }],
+    ['hedge',  'LONG',  { side: 'BUY',  positionSide: 'LONG' }],
+    ['hedge',  'SHORT', { side: 'SELL', positionSide: 'SHORT' }],
+  ]
+  for (const [mode, direction, expected] of cases) {
+    assert.deepEqual(manualOpeningDirection(mode, direction), expected, [mode, direction].join('/'))
+  }
+})
+
+test('手动合约只采用当前环境明确返回的持仓模式', async t => {
+  selectEnvironment('testnet')
+  t.after(() => selectEnvironment('testnet'))
+  let reply = { environment: 'testnet', mode: 'hedge' }
+  t.mock.method(globalThis, 'fetch', async (path, init) => {
+    assert.equal(path, '/api/futures/position-mode')
+    assert.equal(init.headers.get('X-Trading-Environment'), 'testnet')
+    assert.equal(init.headers.get('Authorization'), 'Bearer test-token')
+    return Response.json(reply)
+  })
+  const read = () => getFuturesPositionMode('test-token', 'testnet')
+  assert.equal(await read(), 'hedge')
+  reply = { environment: 'testnet', mode: null }
+  await assert.rejects(read(), /持仓模式无效/)
+  reply = { environment: 'live', mode: 'oneWay' }
+  await assert.rejects(read(), { code: 'ENVIRONMENT_CHANGED' })
+  reply = { environment: 'testnet', mode: 'oneWay' }
+  const beforeSwitch = read()
+  selectEnvironment('live')
+  await assert.rejects(beforeSwitch, { code: 'ENVIRONMENT_CHANGED' })
 })
 
 test('手动开仓以 USDT 保证金衡量固定金额和合约数量', () => {

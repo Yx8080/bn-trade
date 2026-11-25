@@ -112,6 +112,16 @@ async function tick(state, exchange, save, now) {
       position.entryPrice = pending.baseQuantity
         ? (pending.baseQuantity * pending.baseEntryPrice + qty * price) / position.quantity : price
       position.entries = pending.baseEntries + 1
+      if (pending.shared) {
+        // A cumulative fill always uses the combined basis from before submission,
+        // including on recovery after a partial acknowledgement.
+        const before = pending.shared.manualQuantity + pending.baseQuantity
+        position.shared = {
+          manualQuantity: pending.shared.manualQuantity,
+          accountEntryPrice: (before * pending.shared.accountEntryPrice + qty * price) / (before + qty),
+          lastOrderId: ack.orderId,
+        }
+      }
       if (pending.exit) position.exit = pending.exit
       if (pending.historyGap) position.historyGap = true
     }
@@ -120,6 +130,7 @@ async function tick(state, exchange, save, now) {
         state.positions.splice(state.positions.indexOf(position), 1)
       } else {
         position.quantity = rounded(pending.baseQuantity - qty)
+        if (position.shared) position.shared.lastOrderId = ack.orderId
       }
     }
     if (pending.applied !== qty || pending.status !== ack.status) {
@@ -137,12 +148,15 @@ async function tick(state, exchange, save, now) {
     }
   }
 
-  async function submit(kind, symbol, direction, portfolioId, signalTime) {
+  async function submit(kind, symbol, direction, portfolioId, signalTime, manualBase) {
     const position = owned(symbol)
+    const shared = position?.shared ?? manualBase
+    const guard = shared ? { actual: account.get(symbol), lastOrderId: shared.lastOrderId } : undefined
     const pending = {
       kind, symbol, direction, portfolioId, clientOrderId: randomUUID(), baseQuantity: position?.quantity ?? 0,
       baseEntryPrice: position?.entryPrice ?? 0, baseEntries: position?.entries ?? 0,
       signalTime: position?.signalTime ?? signalTime, time: currentTime(),
+      ...(shared && { shared: { ...shared } }),
     }
     state.pending = pending
     invalidatePnl()
@@ -151,8 +165,8 @@ async function tick(state, exchange, save, now) {
     try {
       ack = kind === 'open'
         ? await exchange.open(symbol, direction, state.config.amount, pending.clientOrderId,
-          state.config.leverage ?? undefined, state.config.sizingMode ?? 'notional')
-        : await exchange.close(symbol, direction, pending.baseQuantity, pending.clientOrderId)
+          state.config.leverage ?? undefined, state.config.sizingMode ?? 'notional', guard ?? (!position ? { flat: true } : undefined))
+        : await exchange.close(symbol, direction, pending.baseQuantity, pending.clientOrderId, guard)
     } catch (error) {
       if (error?.definite === true) state.pending = null
       invalidatePnl()
@@ -195,14 +209,22 @@ async function tick(state, exchange, save, now) {
   }
 
   function matches(position, actual) {
-    return actual?.direction === position.direction && closeEnough(actual.quantity, position.quantity)
-      && closeEnough(actual.entryPrice, position.entryPrice, 1e-5)
+    const combined = position.quantity + (position.shared?.manualQuantity ?? 0)
+    return actual?.direction === position.direction && closeEnough(actual.quantity, combined)
+      && closeEnough(actual.entryPrice, position.shared?.accountEntryPrice ?? position.entryPrice, 1e-5)
+  }
+
+  function strategyPnl(position) {
+    const actual = account.get(position.symbol)
+    if (!position.shared) return actual.unrealizedPnl
+    const sign = position.direction === 'LONG' ? 1 : -1
+    return sign * (actual.markPrice - position.entryPrice) * position.quantity
   }
 
   if (state.positions.length || state.pending) await readAccount()
   if (state.retryAt) { persist(); return }
   if (account && !state.pending && state.positions.every(p => matches(p, account.get(p.symbol)))) {
-    state.unrealized = state.positions.reduce((total, p) => total + account.get(p.symbol).unrealizedPnl, 0)
+    state.unrealized = state.positions.reduce((total, p) => total + strategyPnl(p), 0)
     state.unrealizedAt = currentTime()
   } else {
     invalidatePnl()
@@ -244,7 +266,7 @@ async function tick(state, exchange, save, now) {
       releasePosition(position)
       continue
     }
-    if (state.config.stopLoss > 0 && actual.unrealizedPnl <= -state.config.stopLoss) {
+    if (state.config.stopLoss > 0 && strategyPnl(position) <= -state.config.stopLoss) {
       requestExit(position, now, '单仓浮亏已达 ' + state.config.stopLoss + ' USDT 止损线')
       if (verifying && state.pending.kind === 'open') state.pending.exit = position.exit
     }
@@ -335,13 +357,31 @@ async function tick(state, exchange, save, now) {
         releasePosition(position)
         continue
       }
-      if (position && state.config.stopLoss > 0 && account.get(symbol).unrealizedPnl <= -state.config.stopLoss) {
+      if (position && state.config.stopLoss > 0 && strategyPnl(position) <= -state.config.stopLoss) {
         requestExit(position, currentTime(), '单仓浮亏已达 ' + state.config.stopLoss + ' USDT 止损线')
         await exitIfPossible(position)
         continue
       }
-      if (!position && account.has(symbol)) continue
-      await submit('open', symbol, direction, portfolioId, time)
+      let manualBase
+      const existing = account.get(symbol)
+      if (!position && existing) {
+        if (state.config.manualPositionPolicy !== 'add' || existing.direction !== direction) {
+          log(symbol + ' 已有' + (existing.direction === direction ? '同向' : '反向') + '仓位，跳过本次跟单。')
+          continue
+        }
+        try {
+          if (!await exchange.isPlatformManualPosition(existing)) {
+            log(symbol + ' 未能确认现有仓位全部来自平台手动下单，跳过本次跟单。')
+            continue
+          }
+        } catch (error) {
+          exchangeProblem(symbol + ' 无法核对手动仓位来源，跳过本次跟单。', error)
+          continue
+        }
+        if (currentTime() - time > freshnessMs) continue
+        manualBase = { manualQuantity: existing.quantity, accountEntryPrice: existing.entryPrice }
+      }
+      await submit('open', symbol, direction, portfolioId, time, manualBase)
     }
     for (const { feed, start, until } of batches) {
       feed.since = Math.max(feed.since, until)

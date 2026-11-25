@@ -45,7 +45,7 @@ function commonStep(first, second) {
   return first / a * second
 }
 
-export async function symbolRules(env, base, symbol, type = 'MARKET') {
+async function getContract(env, base, symbol) {
   let cached = marketInfo.get(env)
   if (!cached || cached.base !== base || Date.now() >= cached.expiresAt) {
     const info = binanceRequest(env, base, '/fapi/v1/exchangeInfo').then(data => {
@@ -56,10 +56,10 @@ export async function symbolRules(env, base, symbol, type = 'MARKET') {
     marketInfo.set(env, cached)
     info.catch(() => { if (marketInfo.get(env) === cached) marketInfo.delete(env) })
   }
-  const market = (await cached.info).get(symbol)
-  if (!market || market.status !== 'TRADING' || market.quoteAsset !== 'USDT' || !market.orderTypes?.includes(type)) {
-    throw new ApiError(409, 'COPY_MARKET_UNAVAILABLE', '该 USDT 合约当前不支持所选订单类型。')
-  }
+  return (await cached.info).get(symbol)
+}
+
+function lotRules(market, type) {
   if (!Array.isArray(market.filters)) throw invalidData()
   const filters = new Map(market.filters.map(filter => [filter.filterType, filter]))
   const lot = filters.get('LOT_SIZE')
@@ -67,7 +67,33 @@ export async function symbolRules(env, base, symbol, type = 'MARKET') {
   if (!lot || !marketLot) throw invalidData()
   const step = commonStep(units(lot.stepSize), units(marketLot.stepSize))
   if (!step) throw invalidData()
-  return { step, lots: type === 'MARKET' ? [lot, marketLot] : [lot], minNotional: units(filters.get('MIN_NOTIONAL')?.notional) }
+  return { step, lots: type === 'MARKET' ? [lot, marketLot] : [lot] }
+}
+
+export async function symbolRules(env, base, symbol, type = 'MARKET') {
+  const market = await getContract(env, base, symbol)
+  if (!market || market.status !== 'TRADING' || market.quoteAsset !== 'USDT' || !market.orderTypes?.includes(type)) {
+    throw new ApiError(409, 'COPY_MARKET_UNAVAILABLE', '该 USDT 合约当前不支持所选订单类型。')
+  }
+  const rules = lotRules(market, type)
+  return { ...rules, minNotional: units(market.filters.find(filter => filter.filterType === 'MIN_NOTIONAL')?.notional) }
+}
+
+export async function closeLotRules(env, base, symbol) {
+  const market = await getContract(env, base, symbol)
+  if (market?.status !== 'TRADING' || !market.orderTypes?.includes('MARKET'))
+    throw new ApiError(409, 'CLOSE_MARKET_UNAVAILABLE', '此合约当前无法市价平仓。')
+  if (typeof market.baseAsset !== 'string' || !market.baseAsset) throw invalidData()
+  const { step, lots } = lotRules(market, 'MARKET')
+  let min = 0n
+  let max = 0n
+  for (const lot of lots) {
+    const lower = units(lot.minQty)
+    const upper = units(lot.maxQty)
+    if (lower > min) min = lower
+    if (upper && (!max || upper < max)) max = upper
+  }
+  return { baseAsset: market.baseAsset, stepSize: decimal(step), minQty: decimal(min), maxQty: max ? decimal(max) : null }
 }
 
 export function sizeMarketOrder(requested, rules) {

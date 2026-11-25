@@ -27,14 +27,12 @@
   align-items: start;
   margin-bottom: 20px;
 }
-.market-stack {
-  display: grid;
-  gap: 17px;
+.futures-actions {
+  --order-gutter: 21px;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
 }
-.spot-workspace .market-stack { display: contents; }
-.spot-workspace .account-card { order: 2; grid-column: 1 / -1; }
-.futures-actions { --order-gutter: 21px; }
 .futures-actions > .ledger-heading { padding-bottom: 5px; }
 html:has(.futures-workspace) { scrollbar-gutter: stable; }
 .order-tabs {
@@ -54,12 +52,8 @@ html:has(.futures-workspace) { scrollbar-gutter: stable; }
   border-radius: 0;
 }
 .order-tabs button[aria-pressed='true'] { border-bottom-color: var(--green); box-shadow: none; }
-.futures-workspace .account-card .table-scroll { max-height: 27rem; }
-.futures-workspace .account-card td, .futures-workspace .account-card th { padding-inline: 12px; }
-.futures-workspace .account-card td:first-child, .futures-workspace .account-card th:first-child { padding-left: 20px; }
-.futures-workspace .account-card td:last-child, .futures-workspace .account-card th:last-child { padding-right: 20px; }
+.futures-workspace + .account-card .table-scroll { max-height: 27rem; }
 @media (max-width: 820px) {
-  .market-stack { gap: 12px; }
   .futures-actions { --order-gutter: 15px; }
 }
 @media (max-width: 720px) {
@@ -176,31 +170,6 @@ html:has(.futures-workspace) { scrollbar-gutter: stable; }
 .ticket-form {
   display: grid;
   gap: 12px;
-}
-.segmented {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  border-radius: 7px;
-  padding: 3px;
-  background: #f1f4ef;
-}
-.segmented button {
-  height: 31px;
-  border: 0;
-  border-radius: 5px;
-  color: var(--muted);
-  background: transparent;
-  font-size: 13px;
-}
-.segmented button.buy {
-  background: #dceedd;
-  color: #175b33;
-  font-weight: 620;
-}
-.segmented button.sell {
-  background: #f3ded7;
-  color: #98402f;
-  font-weight: 620;
 }
 .two-fields {
   display: grid;

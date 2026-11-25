@@ -127,8 +127,8 @@ export function requireSymbol(symbol) {
   return symbol
 }
 
-export function orderLookup(searchParams) {
-  const symbol = requireSymbol(searchParams.get('symbol'))
+export function orderLookup(searchParams, validateSymbol = requireSymbol) {
+  const symbol = validateSymbol(searchParams.get('symbol'))
   const origClientOrderId = searchParams.get('clientOrderId')
   if (!isClientOrderId(origClientOrderId)) throw new ApiError(400, 'INVALID_ORDER_ID', '客户订单号无效。')
   return { symbol, origClientOrderId }

@@ -43,6 +43,7 @@ export function createLocalOrderDb(filename) {
   const unlinked = database.prepare('SELECT 1 ' + requestScope +
     " AND c.order_id IS NULL AND p.order_id IS NULL AND coalesce(p.status, 'UNCONFIRMED')='UNCONFIRMED' LIMIT 1")
   const knownClients = database.prepare(`SELECT r.client_order_id AS id,coalesce(c.order_id,p.order_id) AS orderId,
+    c.portfolio_id AS portfolioId,c.kind AS copyKind,c.direction AS copyDirection,
     p.time,p.status,p.side,p.type,p.position_side AS positionSide ` + requestScope +
     ' AND r.client_order_id IN (SELECT value FROM json_each(?))')
   const claimSymbol = database.prepare(`INSERT INTO futures_symbol_leases (environment, user_id, symbol, owner, expires_at)
@@ -73,19 +74,27 @@ export function createLocalOrderDb(filename) {
     hasUnlinkedRequests(environment, market, userId, key, symbol) {
       return Boolean(unlinked.get(environment, market, userId, key, symbol, key, symbol))
     },
-    reservedOrderIds(environment, market, userId, key, symbol, orders) {
+    reservedOrderSources(environment, market, userId, key, symbol, orders) {
       const ids = JSON.stringify(orders.map(o => o.clientOrderId))
       const requests = new Map(knownClients.all(environment, market, userId, key, symbol, key, symbol, ids).map(r => [r.id, r]))
-      const matches = new Set()
+      const matches = new Map()
       for (const order of orders) {
         const request = requests.get(order.clientOrderId)
         if (!request) continue
-        // Legacy reservations have only a local client ID. Match those using
-        // the authenticated exchange's mapping from client ID to venue ID.
-        const linked = request.orderId ? request.orderId === order.orderId : request.time == null
-          || (request.status === 'UNCONFIRMED' && matchesUnconfirmedOrder(request, market,
-            order.time, order.side, order.type, order.positionSide))
-        if (linked) matches.add(order.orderId)
+        if (request.orderId && request.orderId !== order.orderId) continue
+        if (request.portfolioId && request.time == null) {
+          matches.set(order.orderId, { source: 'copy', portfolioId: request.portfolioId,
+            copyKind: request.copyKind, copyDirection: request.copyDirection })
+        } else if (request.time == null || request.portfolioId) {
+          // An old client-ID-only reservation cannot distinguish manual from copy.
+          matches.set(order.orderId, { source: 'unverified', portfolioId: null })
+        } else if (request.orderId || (request.status === 'UNCONFIRMED' && matchesUnconfirmedOrder(request, market,
+          order.time, order.side, order.type, order.positionSide))) {
+          matches.set(order.orderId, { source: 'manual', portfolioId: null })
+        } else if (request.status === 'UNCONFIRMED' && (!Number.isSafeInteger(order.time) || !order.side || !order.type
+          || (market === 'futures' && !order.positionSide))) {
+          matches.set(order.orderId, { source: 'unverified', portfolioId: null })
+        }
       }
       return matches
     },

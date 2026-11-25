@@ -34,15 +34,13 @@ function lookup() {
     <label v-if="disabled && preferred == null" class="field"><span>跟单杠杆</span>
       <input value="沿用交易对当前杠杆" disabled /></label>
     <LeverageControl v-else v-model="preferred" label="跟单杠杆" :disabled="disabled" required
-      :slider-max="info?.symbolMaxLeverage"
-      description="每次跟单按信号交易对和预计开仓后的档位核对，超限会跳过该笔开仓。可用倍数以币安最终确认为准。" />
+      :slider-max="info?.symbolMaxLeverage" />
     <div v-if="session" class="lookup">
       <label class="field"><span>查询交易对的最高杠杆</span>
         <input v-model="input" spellcheck="false" @keydown.enter.prevent="lookup" /></label>
       <button class="btn" type="button" @click="lookup">查询档位</button>
     </div>
-    <p v-if="!session" class="ticket-hint">连接账户后可查询任一 USDT 合约的币安杠杆档位。</p>
-    <p v-else-if="loading" class="ticket-hint" role="status">正在读取 {{ symbol }} 的币安杠杆档位…</p>
+    <p v-if="session && loading" class="ticket-hint" role="status">正在读取 {{ symbol }} 的币安杠杆档位…</p>
     <p v-if="info" class="ticket-hint" role="status">
       {{ info.symbol }} 的币安最高杠杆为 <strong>{{ info.symbolMaxLeverage }} 倍</strong>。
       <template v-if="info.maxLeverage">当前持仓档位上限 {{ info.maxLeverage }} 倍。</template>
