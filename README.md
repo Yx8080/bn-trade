@@ -1,85 +1,85 @@
-# 币安交易工作台
+# Binance Trading Workbench
 
-在一个工作台查看币安带单员的公开成交、配置合约跟单、手动交易和核对自己的成交盈亏。前端使用 Vue 3 和 TypeScript，Node.js 服务负责账户访问、策略执行和 SQLite 记账。
+Monitor public fills from Binance lead traders, configure futures copy trading, place manual orders, and review the P&L from your own fills in one workspace. The frontend uses Vue 3 and TypeScript. A Node.js service handles account access, strategy execution, and the SQLite ledger.
 
-## 启动
+## Getting started
 
-使用 Node.js 22.21+（22.x）或 24.5+。
+Use Node.js 22.21 or later in the 22.x series, or Node.js 24.5 or later.
 
 ```sh
 npm ci
 npm run dev
 ```
 
-打开 Vite 打印的本地地址，默认是 `http://127.0.0.1:5173`。首次使用可以按下面的路径操作。
+Open the local address printed by Vite, which defaults to `http://127.0.0.1:5173`. The menu and button names below are English translations of the labels in the app's Chinese interface.
 
-1. **看公开成交。** 首页「带单监控」会自动轮询已关注组合。「管理组合 → 添加组合」可粘贴币安合约带单详情链接，也可只填地址中 `/lead-details/` 后的数字。示例组合 ID 为 `5075281354358777856`。[币安组合详情示例](https://www.binance.com/zh-CN/copy-trading/lead-details/5075281354358777856)
-2. **预览跟单设置。** 打开「合约交易 → 跟单交易」，在「跟单对象」中勾选一位或多位带单员，选择固定保证金或合约账户总权益百分比，再设置跟单杠杆。缺少目标时可点「添加组合」。访客可点击「预览跟单设置」核对名单、金额及预计初始保证金。启动前需连接账户并确认交易环境。
-3. **核对自己的结果。** 「跟单交易 → 执行状态」显示策略持仓和待核实订单。「盈亏情况」汇总平台跟单、手动合约和现货买入的已核实成交及费用，也可单独查询交易所其他成交。手动合约订单从「合约交易 → 手动交易」进入，现货市价单从「现货买入」进入。
+1. **Watch public fills.** The **Lead Trader Monitor** on the home page automatically polls the portfolios you follow. Under **Manage Portfolios → Add Portfolio**, paste a Binance futures lead trader's portfolio URL or enter the numeric ID after `/lead-details/`. For example, use portfolio ID `5075281354358777856`. [Example Binance portfolio](https://www.binance.com/zh-CN/copy-trading/lead-details/5075281354358777856)
+2. **Preview your copy trading settings.** Open **Futures Trading → Copy Trading**. Under **Lead Traders**, select one or more traders, choose fixed margin or a percentage of total futures account equity, and set the leverage. Use **Add Portfolio** if a trader is missing. As a guest, you can select **Preview Copy Trading Settings** to review the selected traders, order sizing, and estimated initial margin. Connect an account and confirm the trading environment before starting.
+3. **Review your results.** **Copy Trading → Execution Status** shows strategy positions and orders awaiting reconciliation. **P&L** summarizes verified fills and fees from copy trades, manual futures trades, and spot buys placed through the workbench. It also lets you look up other fills on Binance separately. Place manual futures orders under **Futures Trading → Manual Trading** and spot market buys under **Spot Buy**.
 
-侧栏「操作文档」有真实界面截图，以及组合 ID、账户配置、止损、暂停和盈亏的逐步说明。
+Open **User Guide** in the sidebar for screenshots and step-by-step instructions on finding portfolio IDs, connecting an account, setting a stop loss, pausing a strategy, and reviewing P&L.
 
-## 公开查询出现 502 时
+## Troubleshooting 502 errors on public data requests
 
-若实时监控提示服务器无法连接币安，请检查运行 Node 服务的机器能否访问币安，以及代理是否正在运行。Windows 上，服务会读取当前用户对目标地址的系统代理规则。开发、预览和生产都支持在项目根目录的 `.env.local` 或进程环境中指定 `HTTPS_PROXY`（或 `HTTP_PROXY`）及 `NO_PROXY`，显式代理优先。修改后重启 Node 服务。断网时仍可查询和翻阅已保存在 SQLite 中的公开成交。
+If the live monitor reports that the server cannot reach Binance, check whether the machine running the Node.js service can reach Binance and whether your proxy is running. On Windows, the service reads the current user's system proxy rules for the destination. In development, preview, and production, you can set `HTTPS_PROXY` (or `HTTP_PROXY`) and `NO_PROXY` in the project root's `.env.local` file or in the process environment. Explicit proxy settings take precedence. Restart the Node.js service after changing them. While offline, you can still search and browse public fills already stored in SQLite.
 
-## 查看带单员的盈亏
+## Reviewing lead trader P&L
 
-- **成交明细**按日期和组合查询 SQLite 中实际监控到的公开成交，「加载更早成交」也只读本地。币安披露的 `totalPnl` 用于显示平多、平空订单的盈亏，缺失值单独标记。汇总只覆盖已加载且已披露的平仓成交，按币种分别计算。
-- **已平仓位**按组合从 SQLite 翻页。实时监控发现平仓成交后，只有本地缺这笔仓位或其披露字段时，服务才检查最新的仓位披露。服务优先按仓位 ID 匹配。成交未给出仓位 ID 时，交易对、方向和平仓时间（精确到毫秒）必须能唯一确定该仓位。整仓盈亏采用披露的 `closingPnl`。已有数值会保留，包括零盈亏。
-- **账户持仓**展示币安按标记价格返回的未实现盈亏。合约页的试算器按方向、开仓价、标记价和数量估算线性合约的价格盈亏，不含手续费和资金费。
+- **Trade History** filters the public fills captured in SQLite by date and portfolio. **Load Older Trades** also reads from local storage. The workbench uses Binance's reported `totalPnl` to display P&L for fills that close long or short positions and flags missing values. Totals cover only loaded closing fills with reported P&L and are calculated separately by asset.
+- **Closed Positions** shows paginated SQLite records by portfolio. When the live monitor detects a closing fill, the service checks the latest position disclosures only if the position or its disclosed fields are missing locally. It tries to match by position ID first. If the fill has no position ID, the symbol, side, and closing time down to the millisecond must uniquely identify the position. The reported `closingPnl` gives the P&L for the whole position. Existing values are preserved, including zero.
+- **Account Positions** shows unrealized P&L reported by Binance based on the mark price. The futures calculator estimates price P&L for linear contracts from the side, entry price, mark price, and quantity, before trading fees and funding.
 
-组合支持输入币安详情链接或数字 ID，并可设备注。关注列表保存在当前浏览器，访客和不同账户使用独立列表。公开成交以组合 ID 在本地共用，时间为北京时间。监控页可见时开始采集；同时查看同一组合的页面共用一次采集。服务只采样最新一页，首次启动、重新打开和网络恢复都从当前继续。采集空档不会补录。日期筛选只影响本地显示范围。
+You can add a portfolio by Binance details URL or numeric ID and attach a note. The watchlist is stored in the current browser, with separate lists for guests and each account. Local public fill history is shared by portfolio ID. Times are shown in Beijing time (UTC+8). Collection begins when the monitoring page is visible. Pages watching the same portfolio share one collector. The service samples only the latest page and starts from the current feed on first launch, when you reopen the monitor, or when the network recovers. Gaps in collection are left unfilled. Date filters affect only the locally displayed records.
 
-## 跟单交易与盈亏
+## Copy trading and P&L
 
-每个账户环境可在同一策略中指定一位或多位带单员，策略从启动后的新成交开始跟随。所选组合共用金额、杠杆和同时持仓上限。同一交易对由先开仓的组合管理，持仓期间跳过其他组合在该交易对的信号。跟单持仓和成交记录会显示所属组合。
+For each account and trading environment, you can select one or more lead traders in a single strategy. The strategy follows new fills from the time it starts. The selected portfolios share order sizing, leverage, and the limit on concurrent positions. The portfolio that triggers the first entry for a symbol controls that position. The strategy skips signals for that symbol from other portfolios while the position is open. Copy trading positions and fill records show the portfolio that triggered them.
 
-新策略默认按固定保证金开仓。每单 10 USDT、杠杆 10 倍，对应目标合约价值 100 USDT。选择「按总权益百分比」时，每笔保证金等于合约账户总权益乘以填写的百分比。例如总权益 1,000 USDT、比例 2%、杠杆 10 倍，目标保证金为 20 USDT，合约价值约 200 USDT。跟单每次开仓和加仓都重新读取权益。账户总权益取币安账户级 `totalMarginBalance`，包含未实现盈亏；联合保证金账户按币安 USDT/USD 指数折算。数量按交易步长向下取整，手续费另计。
+New strategies use fixed margin by default. With 10 USDT of margin per order and 10× leverage, the target notional is 100 USDT. If you select **Percentage of Total Equity**, the margin for each order is total futures account equity multiplied by the configured percentage. With 1,000 USDT of equity, a 2% allocation, and 10× leverage, the target margin is 20 USDT and the notional is about 200 USDT. The strategy refreshes equity every time it opens or adds to a position. It uses Binance's account-level `totalMarginBalance`, which includes unrealized P&L. For futures accounts in Multi-Assets Mode, the service converts that value to USDT using Binance's USDT/USD index. Order quantities are rounded down to the exchange's quantity step. Trading fees are charged separately.
 
-选择「只跟首笔」会跳过持仓期间的同向加仓。「按相同规则加仓」会再次按所选保证金规则计算，单仓开仓次数包含首笔。旧策略可以在预览里核对原来的名义金额及杠杆。连接合约账户后，可查询指定交易对的币安杠杆档位。跟单员可能交易多个合约，服务端在每次开仓和加仓前按实际交易对和预计总持仓复核，超过档位上限会跳过并记录原因。
+**Copy Only the First Entry** skips subsequent entries in the same direction while the position is open. **Add Using the Same Rules** recalculates margin with the selected sizing rule. The per-position entry count includes the first order. For older strategies, the preview shows the original notional and leverage settings. After connecting a futures account, you can look up Binance leverage brackets for a symbol. Lead traders can trade multiple contracts, so before every entry or addition, the service checks the actual symbol and the projected total position size. It skips orders that would exceed the bracket limit and records why.
 
-策略使用单向持仓的 USDT 合约。共享标记价格 WebSocket 只订阅策略持有的交易对。达到止损线时，服务端复核实际持仓后发起仅减仓市价单。周期检查在推送中断时继续工作。服务中断期间无法执行本地止损，成交滑点可能使实际损失超过触发值。带单员首次平掉对应方向的部分或全部仓位时，本策略退出自己跟入的全部数量。
+The strategy trades USDT-margined futures in One-Way Mode. A shared mark-price WebSocket subscribes only to symbols held by the strategy. When the stop-loss threshold is reached, the service verifies the actual position and submits a reduce-only market order. Periodic checks continue if the WebSocket stream is interrupted. Local stop losses require the service to be running, and slippage can push the actual loss past the trigger value. The first time the lead trader closes any part of the corresponding position, the strategy exits its entire copied quantity.
 
-「已有平台手动同向仓位时」默认为跳过。选「跟随加仓」后，策略在成交记录能核实整笔现有仓位由本平台手动建立时，才跟入同方向的新信号。它按自己的成交数量和均价核算止损，并按跟单数量发起仅减仓。同一合约的合并仓位共用杠杆。币安按合仓均价结算，平台从成交回执读取已实现盈亏和手续费。持仓方向相反、来源待核实或已有其他组合跟入时会跳过。
+By default, the strategy skips a signal if a manual position placed through the workbench already exists in the same direction. If you select **Copy as an Addition**, it follows the new signal only when fill records verify that the entire existing position was opened manually through the workbench. The strategy calculates its stop loss using its own filled quantity and average entry price and submits reduce-only orders for its own copied quantity. The combined position shares one leverage setting. Binance settles using the combined average entry price, and the workbench reads realized P&L and fees from the fill confirmations. The strategy skips positions on the opposite side, positions whose source is still being verified, and positions already copied from another portfolio.
 
-关闭浏览器后，已启动的策略继续在 Node 服务上运行。服务重启后，需在原环境重新连接同一账户，策略才能继续处理新信号、跟随平仓和执行本地止损。「暂停新开仓」保留已有仓位的止损、跟随平仓和已提交订单的核对。要更改组合或参数，先暂停并等跟单仓位与待核实订单全部结清。
+An active strategy keeps running on the Node.js service after you close the browser. After a service restart, reconnect the same account in its original environment so the strategy can resume processing new signals, following closures, and executing local stop losses. **Pause New Entries** leaves stop losses and copied exits active for existing positions and continues reconciling submitted orders. To change portfolios or strategy settings, pause first and wait until all copied positions are closed and pending orders are reconciled.
 
-「盈亏情况」只把平台提交的自动跟单、手动合约和现货买入计入账本。SQLite 文件为 `.trade-data/orders.sqlite`。服务端按账户、环境、市场、交易对和订单标识核对实际成交，按币种汇总已实现盈亏和手续费。现货买入金额计入成本，浮动盈亏另列。已有跟单历史继续可查，旧版手动订单的防重编号不足以重建成交和成本。外部成交与账户持仓按需从币安读取，单独展示；若当前仓位无法和平台成交匹配，平台浮盈亏显示为待核对。资金费请在币安资金流水中另行核对。
+The **P&L** ledger covers only automated copy trades, manual futures trades, and spot buys placed through the workbench. The SQLite file is `.trade-data/orders.sqlite`. The service reconciles actual fills by account, environment, market, symbol, and order identifier, then totals realized P&L and fees by asset. Spot buy amounts are recorded as cost, and unrealized P&L is shown separately. Existing copy trading history remains available. The order identifiers used to prevent duplicate manual orders in earlier versions contain too little information to reconstruct those fills and costs. Other exchange fills and account positions are fetched from Binance on demand and shown separately. If a current position cannot be matched to workbench fills, its unrealized P&L is marked as pending verification. Check funding fees separately in your Binance transaction history.
 
-## 绑定币安账户
+## Connecting a Binance account
 
-1. 在右上角选择「测试网」或「实盘」，再点击旁边的「连接账户」，填写该环境的币安 **HMAC API Key 和 API Secret**。首次打开默认选中测试网。本机可直接使用 localhost 或 127.0.0.1，通过网络访问时请使用 HTTPS。
-2. 点击「验证并绑定账户」。服务端通过签名的只读请求，向币安核实 UID 和可访问的市场。连接后请核对界面上的账户 UID 和市场。下单需要对应的现货或合约交易权限。
-3. 刷新页面或会话到期后，重新连接即可查看账本和策略。在同一环境更换 API Key 后，只要币安验证为同一账户，仍可查看同一份交易记录。实盘、合约模拟盘（Demo Trading）和现货测试网（Spot Testnet）分别识别 UID 并记账。「断开账户」注销本次会话，已启动的后台跟单继续运行。要停止跟进新订单，请在断开前点击「暂停新开仓」。
+1. Select **Testnet** or **Live** in the upper-right corner, then click **Connect Account**. Enter the Binance **HMAC API Key and API Secret** for that environment. Testnet is selected on first launch. For local access, you can use localhost or 127.0.0.1 directly. Use HTTPS when accessing the workbench over a network.
+2. Click **Verify and Connect Account**. The service sends signed, read-only requests to Binance to verify the UID and accessible markets. Once connected, check the UID and markets displayed in the app. Placing orders requires the relevant spot or futures trading permissions.
+3. Reconnect after refreshing the page or when your session expires to access the ledger and strategies. If you replace an API key within the same environment, Binance must verify that it belongs to the same account for you to access the same records. Live trading, Futures Demo Trading, and Spot Testnet have separate UID verification and ledgers. **Disconnect Account** ends the current session. Active copy trading strategies continue in the background. Click **Pause New Entries** before disconnecting if you want to stop following new entries.
 
-连接窗口会先核对后端是否支持内存密钥和 UID 验证。若提示后端版本不兼容，使用新版代码重启 Node 服务后点击「重试」，即可显示密钥输入框。
+The connection dialog first checks whether the backend supports in-memory credentials and UID verification. If it reports an incompatible backend version, restart the Node.js service with the updated code and click **Retry** to display the credential fields.
 
-顶部切换立即更新当前标签页的行情、账户和盈亏视图。两套环境分别绑定，本页内切回已连接的环境可继续使用有效会话。切换视图、断开连接时，已启动的策略会继续在原环境运行。每次下单和启动策略都要在选定环境内确认。
+The environment switch updates market data, account information, and P&L immediately in the current tab. Connect each environment separately. When you switch back within the same tab, you can continue using a valid session. Active strategies continue in their original environments when you switch views or disconnect. Confirm the selected environment each time you place an order or start a strategy.
 
-升级前按密钥建立的旧工作区，需用当时仍有效的原密钥连接一次，使服务能够核实历史记录对应的 UID。已经撤销的原密钥无法再向币安验证。对用旧版固定令牌访问的账户，服务同样需要核实底层密钥对应的 UID。未指定环境的旧 API 客户端沿用 `BINANCE_FUTURES_ENV`，缺省为 `testnet`。
+If you upgraded from a version that used key-based workspaces, connect once with the original, still-valid key so the service can verify the UID associated with your historical records. Revoked keys can no longer be verified by Binance. For accounts accessed through an older fixed token, the service also needs to verify the UID associated with the underlying key. Older API clients that omit the environment use `BINANCE_FUTURES_ENV`, which defaults to `testnet`.
 
-通过工作台输入的 API Key 和 API Secret 仅在内存中使用。浏览器在绑定成功后清空输入框，页面内存中的会话凭证最长有效 12 小时。断开页面后，服务仍在内存中持有已验证市场的密钥，直到更换该市场的密钥或服务进程退出。服务重启后，请在对应环境重新连接需要运行策略的币安账户。
+API keys and secrets entered through the workbench are held only in memory. The browser clears the input fields after a successful connection. The session credential held in page memory lasts up to 12 hours. The service keeps each verified market's credentials in memory after you disconnect, until you replace them or the service process exits. After a service restart, reconnect the Binance accounts whose strategies need to run in each environment.
 
-SQLite 持久保存所属 UID、策略、订单和盈亏账本。升级时会清除当前数据库中旧版保存的加密凭据。升级前制作的数据库备份和解密文件仍保留原内容。
+SQLite persists account UIDs, strategies, orders, and P&L records. Upgrading clears encrypted credentials stored by earlier versions from the current database. Database backups and decrypted files created before upgrading retain their original contents.
 
-## 行情与下单
+## Market data and order placement
 
-| 功能 | 币安接口与口径 |
+| Feature | Binance API and behavior |
 | --- | --- |
-| 合约行情 | `/fapi/v2/ticker/price` 读取最新成交价，`/fapi/v1/premiumIndex` 读取标记价。页面优先使用 WebSocket 推送，首屏和推送中断时以 HTTP 获取快照。 |
-| 合约持仓、余额 | `/fapi/v3/positionRisk` 读取当前有数量的仓位和未实现盈亏，`/fapi/v3/account` 读取钱包及可用余额。 |
-| 合约杠杆与下单 | `GET /fapi/v1/leverageBracket` 读取当前账户在该合约的名义价值档位及最高杠杆，结合持仓计算当前档位。`/fapi/v1/symbolConfig` 返回当前设置的倍数。服务端通过 `POST /fapi/v1/leverage` 设置倍数，随后通过 `POST /fapi/v1/order` 提交订单。 |
-| 现货行情、余额 | `/api/v3/ticker/price` 获取价格快照，页面通过 WebSocket 接收最新价，`/api/v3/account` 读取可用和冻结余额。 |
-| 现货买入 | `POST /api/v3/order` 使用 `MARKET BUY` 和 `quoteOrderQty`，按输入的 USDT 金额下单。 |
+| Futures market data | `/fapi/v2/ticker/price` returns the latest trade price, and `/fapi/v1/premiumIndex` returns the mark price. The page uses WebSocket updates and fetches HTTP snapshots on first load or when the stream is interrupted. |
+| Futures positions and balances | `/fapi/v3/positionRisk` returns nonzero positions and unrealized P&L. `/fapi/v3/account` returns wallet and available balances. |
+| Futures leverage and orders | `GET /fapi/v1/leverageBracket` returns the account's notional brackets and maximum leverage for the contract. The current position determines the applicable bracket. `/fapi/v1/symbolConfig` returns the configured leverage. The service sets leverage with `POST /fapi/v1/leverage`, then submits the order with `POST /fapi/v1/order`. |
+| Spot market data and balances | `/api/v3/ticker/price` returns a price snapshot, and the page receives the latest price by WebSocket. `/api/v3/account` returns available and locked balances. |
+| Spot buys | `POST /api/v3/order` uses `MARKET BUY` with `quoteOrderQty` to place an order for the entered USDT amount. |
 
-手动开仓会读取币安合约账户当前的持仓模式。市价开仓可直接填写 USDT 保证金，也可按可用余额的比例选取。点击「预览开多」或「预览开空」，核对账户、环境和数量后确认。单向持仓时，反向成交会先抵减该合约的已有仓位，超出部分才形成反向仓位。
+When you open a position manually, the workbench reads the current position mode from your Binance futures account. For a market entry, specify the margin in USDT or select a percentage of your available balance. Click **Preview Long Entry** or **Preview Short Entry** and check the account, environment, and quantity before confirming. In One-Way Mode, a fill on the opposite side first reduces the existing position in that contract. Any excess opens a position on the opposite side.
 
-手动平仓位于「合约账户 → 当前持仓」。点击目标仓位行末的「平仓」，可选择整仓、按比例或输入合约数量，确认后按市价平仓。双向持仓的多仓和空仓可分别操作。
+To close a position manually, go to **Futures Account → Current Positions**. Click **Close** at the end of the relevant row to close the full position, choose a percentage, or enter a contract quantity. Once confirmed, the workbench submits a market order to close the selected amount. In Hedge Mode, you can manage long and short positions independently.
 
-每次确认使用独立客户订单号，SQLite 在转发前登记该编号。响应超时后可用「查询原订单」对账，币安回执会显示状态、实际成交量和成交均价。
+Each confirmation uses a unique client order ID, which the service records in SQLite before forwarding the order. If the request times out, select **Look Up Original Order** to reconcile it. The Binance response shows the status, filled quantity, and average fill price.
 
-## 构建、部署与维护
+## Build, deployment, and maintenance
 
 ```sh
 npm test
@@ -87,8 +87,8 @@ npm run build
 npm start
 ```
 
-`src/components/` 存放查询、持仓、行情和下单界面。`src/usePortfolioHistory.ts` 管理公开成交的轮询和分页。`src/pnl.ts` 定义盈亏口径。`src/futures.ts` 是浏览器侧交易 API 客户端。`worker/futures.js` 和 `worker/spot.js` 处理对应市场，`worker/trading.js` 统一处理用户身份、签名及订单防重。
+`src/components/` contains the interfaces for lookups, positions, market data, and order placement. `src/usePortfolioHistory.ts` manages polling and pagination for public fills. `src/pnl.ts` defines how P&L is calculated. `src/futures.ts` is the browser-side trading API client. `worker/futures.js` and `worker/spot.js` handle their respective markets, and `worker/trading.js` handles identity, request signing, and duplicate order prevention.
 
-从项目根目录运行 `npm start`，默认地址为 `http://127.0.0.1:3000`。`HOST` 和 `PORT` 可以更改监听地址和端口。多人通过网络使用时，在服务前配置 HTTPS 反向代理。将 `.trade-data/` 放在持久化磁盘上，重启后才能继续使用原有策略、订单核对记录和盈亏账本。生产服务与 Vite 开发服务共用 `server/api.js`。
+Run `npm start` from the project root to serve the app at `http://127.0.0.1:3000` by default. Use `HOST` and `PORT` to change the bind address and port. For shared access over a network, put the service behind an HTTPS reverse proxy. Store `.trade-data/` on persistent storage so strategies, order reconciliation records, and the P&L ledger survive restarts. The production server and the Vite development server share `server/api.js`.
 
-币安接口参考见 [合约 API](https://developers.binance.com/docs/derivatives/usds-margined-futures/general-info)、[现货交易 API](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/trading-endpoints) 和[跟单组合指标](https://www.binance.com/en/support/faq/detail/54aa6d3b43bc4f6eb4a3a6e3aea40acd)。
+Binance references are available for [USDⓈ-M Futures](https://developers.binance.com/docs/derivatives/usds-margined-futures/general-info), [Spot trading endpoints](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/trading-endpoints), and [copy trading portfolio metrics](https://www.binance.com/en/support/faq/detail/54aa6d3b43bc4f6eb4a3a6e3aea40acd).
