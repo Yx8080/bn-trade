@@ -6,7 +6,7 @@ import { DAY_MS, fetchObservedTrades, observePortfolios, releaseObservation, sha
 interface PortfolioResult {
   id: string
   records: ObservedTrade[]
-  cursor?: string
+  nextPage?: { cursor: string; range: DateRange }
   loading: boolean
   paging: boolean
   loaded: boolean
@@ -29,11 +29,11 @@ function newViewId() {
 }
 
 export function usePortfolioHistory(entries: LeadPortfolio[]) {
-  const now = Date.now()
-  const today = ref(shanghaiDate(now))
-  const startDate = ref(shanghaiDate(now - 6 * DAY_MS))
+  const now = ref(Date.now())
+  const today = computed(() => shanghaiDate(now.value))
+  const startDate = ref(shanghaiDate(now.value - DAY_MS))
   const endDate = ref(today.value)
-  const query = ref<DateRange>()
+  const query = ref<DateRange | 'recent'>('recent')
   const portfolios = ref<PortfolioResult[]>(entries.map(({ id }) => ({
     id, records: [], loading: false, paging: false, loaded: false, error: '', refreshedAt: 0,
   })))
@@ -41,7 +41,8 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
   const portfolioName = (id: string) => names.get(id) ?? id
   const error = ref('')
   const monitoring = ref(false)
-  const pinned = ref(false)
+  const pinnedAt = ref<number>()
+  const pinned = computed(() => pinnedAt.value !== undefined)
   const loading = computed(() => portfolios.value.some(p => p.loading))
   const paging = computed(() => portfolios.value.some(p => p.paging))
   const updatedAtById = computed(() => {
@@ -53,6 +54,7 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
     return updated
   })
   const tradeRecords = computed(() => portfolios.value.flatMap(portfolio => portfolio.records.flatMap(record => {
+    if (query.value === 'recent' && record.orderUpdateTime < (pinnedAt.value ?? now.value) - DAY_MS) return []
     const direction = tradeDirection(record)
     return direction ? [{ ...record, direction, portfolioId: portfolio.id }] : []
   })).sort((a, b) => b.orderUpdateTime - a.orderUpdateTime))
@@ -61,25 +63,26 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
   let visit: AbortController | undefined
   const activeViewIds = new Set<string>()
   let timer: number | undefined
-  let rolling = true
 
   async function read(portfolio: PortfolioResult, more = false) {
-    if (!query.value || portfolio.loading || (more && !portfolio.cursor)) return
+    const next = more ? portfolio.nextPage : undefined
+    if (portfolio.loading || (more && !next)) return
     const signal = reads.signal
-    const cursor = more ? portfolio.cursor : undefined
+    const endTime = Date.now()
+    const range = next?.range ?? (query.value === 'recent' ? { startTime: endTime - DAY_MS, endTime } : query.value)
     const sampledAt = portfolio.observation?.lastSuccessAt ?? 0
     portfolio.loading = true
     portfolio.paging = more
     try {
-      const page = await fetchObservedTrades({ ...query.value, portfolioId: portfolio.id }, cursor, signal)
+      const page = await fetchObservedTrades({ ...range, portfolioId: portfolio.id }, next?.cursor, signal)
       if (signal.aborted) return
-      if (cursor) {
+      if (next) {
         const existing = new Set(portfolio.records.map(row => row.observedId))
         portfolio.records.push(...page.list.filter(row => !existing.has(row.observedId)))
       } else {
         portfolio.records = page.list
       }
-      portfolio.cursor = page.cursor
+      portfolio.nextPage = page.cursor ? { cursor: page.cursor, range } : undefined
       portfolio.loaded = true
       portfolio.refreshedAt = sampledAt
       portfolio.error = ''
@@ -102,13 +105,13 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
     }
   }
 
-  function applyRange(range: DateRange) {
+  function applyRange(range: DateRange | 'recent') {
     cancelReads()
     query.value = range
-    pinned.value = false
+    pinnedAt.value = undefined
     for (const portfolio of portfolios.value) {
       portfolio.records = []
-      portfolio.cursor = undefined
+      portfolio.nextPage = undefined
       portfolio.loaded = false
       portfolio.error = ''
       portfolio.refreshedAt = 0
@@ -116,8 +119,16 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
     }
   }
 
+  function showRecent() {
+    now.value = Date.now()
+    startDate.value = shanghaiDate(now.value - DAY_MS)
+    endDate.value = today.value
+    error.value = ''
+    applyRange('recent')
+  }
+
   function search() {
-    today.value = shanghaiDate(Date.now())
+    now.value = Date.now()
     const startTime = dayStart(startDate.value)
     const endDay = dayStart(endDate.value)
     if (!Number.isFinite(startTime) || !Number.isFinite(endDay) || startTime > endDay || endDate.value > today.value) {
@@ -125,34 +136,26 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
       return
     }
     error.value = ''
-    rolling = endDate.value === today.value && startTime === endDay - 6 * DAY_MS
     applyRange({ startTime, endTime: endDay + DAY_MS - 1 })
   }
 
   function loadMore(selected = '') {
-    const next = portfolios.value.filter(p => p.cursor && (!selected || p.id === selected))
+    const next = portfolios.value.filter(p => p.nextPage && (!selected || p.id === selected))
     if (loading.value || !next.length) return
     // Stay on this SQLite snapshot while the user pages through it.
-    pinned.value = true
+    pinnedAt.value ??= now.value
     for (const portfolio of next) void read(portfolio, true)
   }
 
-  function updateDay() {
-    const day = shanghaiDate(Date.now())
-    if (day === today.value) return
-    today.value = day
-    const start = dayStart(day) - 6 * DAY_MS
-    if (!query.value) {
-      startDate.value = shanghaiDate(start)
-      endDate.value = day
-      return
+  function updateClock() {
+    const previous = now.value
+    const previousDay = today.value
+    now.value = Date.now()
+    if (today.value !== previousDay && query.value === 'recent' && !pinned.value &&
+      endDate.value === previousDay && startDate.value === shanghaiDate(previous - DAY_MS)) {
+      startDate.value = shanghaiDate(now.value - DAY_MS)
+      endDate.value = today.value
     }
-    if (!rolling || pinned.value) return
-    if (startDate.value === shanghaiDate(query.value.startTime) && endDate.value === shanghaiDate(query.value.endTime)) {
-      startDate.value = shanghaiDate(start)
-      endDate.value = day
-    }
-    applyRange({ startTime: start, endTime: dayStart(day) + DAY_MS - 1 })
   }
 
   function start() {
@@ -164,13 +167,12 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
       groups.push({ id: newViewId(), items: portfolios.value.slice(i, i + 100) })
     }
     monitoring.value = true
-    updateDay()
-    if (!query.value) search()
-    else if (!pinned.value) for (const portfolio of portfolios.value) void read(portfolio)
+    updateClock()
+    if (!pinned.value) for (const portfolio of portfolios.value) void read(portfolio)
 
     async function heartbeat() {
       if (controller.signal.aborted) return
-      updateDay()
+      updateClock()
       await Promise.all(groups.map(async group => {
         try {
           activeViewIds.add(group.id)
@@ -181,8 +183,8 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
             const status = byId.get(portfolio.id)
             if (!status) throw Error('服务未能确认组合的监控状态。')
             portfolio.observation = status
-            if (query.value && !pinned.value && status.lastSuccessAt && status.lastSuccessAt !== portfolio.refreshedAt &&
-              query.value.endTime >= status.startedAt) void read(portfolio)
+            if (!pinned.value && status.lastSuccessAt && status.lastSuccessAt !== portfolio.refreshedAt &&
+              (query.value === 'recent' || query.value.endTime >= status.startedAt - DAY_MS)) void read(portfolio)
           }
         } catch (cause) {
           if (controller.signal.aborted) return
@@ -213,5 +215,5 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
   }
 
   return { startDate, endDate, today, query, portfolios, error, monitoring, paging, loading,
-    pinned, tradeRecords, updatedAtById, search, loadMore, start, stop, portfolioName }
+    pinned, tradeRecords, updatedAtById, search, showRecent, loadMore, start, stop, portfolioName }
 }

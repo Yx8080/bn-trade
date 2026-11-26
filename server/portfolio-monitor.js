@@ -3,7 +3,8 @@ import { ApiError } from '../worker/trading.js'
 
 const interval = 5_000
 const lease = 25_000
-const latestWindow = 300_000
+const historyWindow = 86_400_000
+const recentOverlap = 300_000
 const maxViews = 512
 const maxPortfolios = 2_000
 const exactNumericFields = new Set(['orderId', 'positionId', 'avgPrice', 'executedQty', 'quoteQuantity', 'totalPnl'])
@@ -11,10 +12,8 @@ const validView = id => typeof id === 'string' && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-)
 const invalid = () => new ApiError(400, 'INVALID_MONITOR', '监控页面标识或组合列表无效。')
 const busy = () => new ApiError(429, 'MONITOR_BUSY', '当前监控组合过多，请稍后重试。')
 
-async function latest(fetchBinance, portfolioId, endTime, signal) {
-  // The public endpoint requires a wider time range. Its first page is the
-  // only page sampled; its cursor is deliberately ignored.
-  const body = { portfolioId, startTime: Math.max(0, endTime - latestWindow), endTime, pageSize: 50 }
+async function historyPage(fetchBinance, portfolioId, { startTime, endTime, indexValue }, signal) {
+  const body = { portfolioId, startTime, endTime, pageSize: 50, indexValue }
   const req = new Request('http://localhost/api/binance/latest-records', { method: 'POST',
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   const response = await worker.fetch(req, { fetchBinance: (url, init) =>
@@ -22,13 +21,14 @@ async function latest(fetchBinance, portfolioId, endTime, signal) {
   const data = JSON.parse(await response.text(), (key, value, context) =>
     typeof value === 'number' && exactNumericFields.has(key) ? context.source : value)
   if (!response.ok || data?.code !== '000000' || data.success === false || !Array.isArray(data.data?.list)) {
-    const error = new ApiError(response.ok ? 502 : response.status, 'MONITOR_UPSTREAM',
-      response.ok ? '币安暂未提供这个组合的公开成交。' : data?.message || '暂时无法读取币安公开成交。')
+    const message = data?.code === '11012005' ? '币安查询繁忙（11012005），将自动重试。'
+      : data?.message || '币安暂未提供这个组合的公开成交。'
+    const error = new ApiError(response.ok ? 502 : response.status, 'MONITOR_UPSTREAM', message)
     error.retryAfter = response.headers.get('Retry-After')
     error.offline = ['UPSTREAM_TIMEOUT', 'UPSTREAM_UNAVAILABLE'].includes(data?.code)
     throw error
   }
-  return data.data.list
+  return data.data
 }
 
 function backoff(error, now, failures) {
@@ -37,15 +37,6 @@ function backoff(error, now, failures) {
   if (Number.isFinite(after) && after > 0) return Math.max(interval, after)
   if ([401, 403, 418, 429, 451].includes(error.status)) return 60_000
   return Math.min(60_000, interval * 2 ** Math.min(4, failures - 1))
-}
-
-function addCoverage(feed, from, to) {
-  // Only successive heartbeats from the SAME page confirm the span between
-  // them. A new tab alone cannot confirm time since a vanished tab's heartbeat.
-  const windows = feed.windows
-  while (windows.length && windows.at(-1).end >= from) from = Math.min(from, windows.pop().start)
-  windows.push({ start: from, end: to })
-  while (windows.length > 1 && windows[0].end < to - latestWindow) windows.shift()
 }
 
 function isClosing(row) {
@@ -97,14 +88,14 @@ export function createPortfolioMonitor({ fetchBinance, getStore, observeClosures
     for (const id of ids) {
       let feed = feeds.get(id)
       if (!feed) {
-        feed = { id, watchers: new Set(), controller: new AbortController(), windows: [], startedAt: at, floor: at,
-          sampledThrough: -1, lastSuccessAt: null, lastPositionChangeAt: null, error: '', failures: 0,
-          retryAt: 0, recovery: at < cooldownUntil, closure: null }
+        feed = { id, watchers: new Set(), controller: new AbortController(), startedAt: at, endTime: at,
+          sampledThrough: -1, history: undefined, lastSuccessAt: null, lastPositionChangeAt: null, error: '',
+          failures: 0, retryAt: 0, closure: null }
         feeds.set(id, feed)
       }
-      addCoverage(feed, prior?.ids.has(id) ? prior.seenAt : at, at)
+      feed.endTime = at
       feed.watchers.add(viewId)
-      portfolios.push({ portfolioId: id, startedAt: feed.startedAt, lastSuccessAt: feed.lastSuccessAt,
+      portfolios.push({ portfolioId: id, startedAt: feed.startedAt, lastSuccessAt: feed.lastSuccessAt, syncing: feed.sampledThrough < 0,
         lastPositionChangeAt: feed.lastPositionChangeAt, error: feed.error })
     }
     void poll()
@@ -128,31 +119,41 @@ export function createPortfolioMonitor({ fetchBinance, getStore, observeClosures
     return !stopped && feeds.get(feed.id) === feed
   }
 
-  async function sample(feed, window) {
-    const endTime = window.end
-    const rows = await latest(fetchBinance, feed.id, endTime, feed.controller.signal)
-    if (!current(feed)) return
-    if (feed.recovery) {
-      // The first successful response after an outage establishes a fresh
-      // baseline. Trades disclosed while the service was unavailable stay out.
-      feed.floor = now()
-      feed.recovery = false
-    } else {
-      // Time already sampled is final even if Binance later discloses an old
-      // record. Keep the last millisecond inclusive for distinct boundary fills.
-      const startTime = Math.max(window.start, feed.floor, feed.sampledThrough, endTime - lease)
-      const visible = rows.filter(row => {
-        const raw = row?.orderUpdateTime
-        const time = typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : raw
-        return Number.isSafeInteger(time) && time >= startTime && time <= endTime
-      })
-      if (visible.length) {
-        const changed = getStore().record(feed.id, { startTime, endTime, rows: visible })
-        const closes = changed.filter(isClosing)
-        if (observeClosures && closes.length) feed.closure = { startTime, endTime, rows: closes, queuedAt: now() }
-      }
+  async function sample(feed) {
+    if (!feed.history?.indexValue || feed.history.endTime <= feed.endTime - historyWindow) {
+      const endTime = feed.endTime
+      // Keep a short overlap for delayed disclosures and catch up after outages.
+      const startTime = Math.max(0, endTime - historyWindow, Math.min(feed.sampledThrough, endTime - recentOverlap))
+      feed.history = { startTime, endTime, indexValue: undefined, cursors: new Set() }
     }
-    feed.sampledThrough = endTime
+    const query = feed.history
+    const { startTime, endTime } = query
+    const { list, total, indexValue } = await historyPage(fetchBinance, feed.id, query, feed.controller.signal)
+    if (!current(feed)) return
+    // Binance can return the last row's cursor even when it has no next page.
+    const firstPageComplete = !query.indexValue && Number.isSafeInteger(total) && total <= list.length
+    const hasMore = !firstPageComplete && list.length > 0 && typeof indexValue === 'string' && indexValue !== '' && indexValue !== '-1'
+    if (hasMore && query.cursors.has(indexValue)) {
+      feed.history = undefined
+      throw new ApiError(502, 'MONITOR_UPSTREAM_CURSOR', '币安返回了重复的成交分页游标，将重新同步。')
+    }
+    const visible = list.filter(row => {
+      const raw = row?.orderUpdateTime
+      const time = typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : raw
+      return Number.isSafeInteger(time) && time >= startTime && time <= endTime
+    })
+    if (visible.length) {
+      const changed = getStore().record(feed.id, { startTime, endTime, rows: visible })
+      const closes = changed.filter(isClosing)
+      if (observeClosures && closes.length) feed.closure = { startTime, endTime, rows: closes, queuedAt: now() }
+    }
+    if (hasMore) {
+      query.cursors.add(indexValue)
+      query.indexValue = indexValue
+    } else {
+      feed.sampledThrough = endTime
+      feed.history = undefined
+    }
     feed.lastSuccessAt = now()
     feed.error = ''
     feed.failures = 0
@@ -163,32 +164,26 @@ export function createPortfolioMonitor({ fetchBinance, getStore, observeClosures
     expire(at)
     if (stopped || at < nextAt) return
     for (const [id, feed] of feeds) {
-      const window = feed.windows.at(-1)
       let closure = feed.closure
-      if (closure && (at - closure.queuedAt > lease || closure.endTime < window.start)) closure = feed.closure = null
-      if (at < feed.retryAt || (!closure && window.end <= feed.sampledThrough)) continue
+      if (closure && at - closure.queuedAt > lease) closure = feed.closure = null
+      if (at < feed.retryAt || (!closure && !feed.history && feed.endTime <= feed.sampledThrough)) continue
       feeds.delete(id)
       feeds.set(id, feed)
       try {
         if (closure) {
           feed.closure = null
-          const isCurrent = () => current(feed) && feed.windows.at(-1).start <= closure.endTime
+          const isCurrent = () => current(feed)
           const changed = await observeClosures(id, { ...closure, isCurrent, signal: feed.controller.signal })
           if (changed > 0 && isCurrent()) feed.lastPositionChangeAt = now()
-        } else await sample(feed, window)
+        } else await sample(feed)
       } catch (error) {
         if (current(feed)) {
           feed.error = error instanceof ApiError ? error.message : '监控采样暂时失败，请稍后查看。'
-          if (!closure) feed.recovery = true
           const delay = backoff(error, now(), ++feed.failures)
           feed.retryAt = now() + delay
           if ([401, 403, 418, 429, 451].includes(error.status) || error.offline || error.retryAfter || error.headers?.['Retry-After']) {
             cooldownUntil = Math.max(cooldownUntil, feed.retryAt)
             nextAt = Math.max(nextAt, cooldownUntil)
-            for (const paused of feeds.values()) {
-              paused.recovery = true
-              paused.closure = null
-            }
           }
         }
       } finally {

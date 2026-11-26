@@ -31,6 +31,7 @@ const {
   tradeRecords,
   updatedAtById,
   search,
+  showRecent,
   loadMore,
   start,
   stop,
@@ -82,14 +83,20 @@ const visiblePortfolios = computed(() => selected.value
   : portfolios.value)
 const loaded = computed(() => visiblePortfolios.value.some(portfolio => portfolio.loaded))
 const failures = computed(() => visiblePortfolios.value.filter(portfolio => portfolio.error))
-const hasMore = computed(() => visiblePortfolios.value.some(portfolio => portfolio.cursor))
+const hasMore = computed(() => visiblePortfolios.value.some(portfolio => portfolio.nextPage))
 const observationFailures = computed(() => visiblePortfolios.value.filter(portfolio => portfolio.observation?.error))
+const syncing = computed(() => monitoring.value && visiblePortfolios.value.some(portfolio =>
+  !portfolio.observation || portfolio.observation.syncing))
 const lastObserved = computed(() => Math.max(0, ...visiblePortfolios.value.map(p => p.observation?.lastSuccessAt ?? 0)))
 const emptyState = computed(() => {
   if (!props.entries.length) return { title: '尚未添加带单组合', detail: '添加组合后，打开本页即可开始监控。' }
-  if (failures.value.length) return { title: '本地成交记录读取未完成', detail: '点击「查询」重新读取所选时段的本地记录。' }
+  if (failures.value.length) return { title: '本地成交记录读取未完成', detail: '点击「最近 24 小时」或「查询」重新读取本地记录。' }
   if (!loaded.value && loading.value) return { title: '正在读取本地成交记录', detail: '' }
   if (hasMore.value) return { title: '当前结果没有可识别的开平仓成交', detail: '可继续加载更早的本地记录。' }
+  if (query.value === 'recent' && observationFailures.value.length) {
+    return { title: '最近 24 小时的成交暂未同步完成', detail: '币安查询会自动重试。' }
+  }
+  if (query.value === 'recent' && syncing.value) return { title: '正在同步币安最近 24 小时的公开成交', detail: '' }
   return { title: '所选时段暂无已记录的成交', detail: '本地历史只覆盖工作台实际监控到的公开成交。' }
 })
 function signed(value: number) {
@@ -175,7 +182,7 @@ function pnlColor(value: number | null) {
       </div>
       <span class="status" :class="{ active: monitoring && !observationFailures.length }">
         <i></i>
-        {{ monitoring && observationFailures.length ? '监控连接异常' : monitoring ? '监控中' : entries.length ? '监控已暂停' : '等待添加组合' }}
+        {{ monitoring && observationFailures.length ? '同步异常' : syncing ? '同步中' : monitoring ? '监控中' : entries.length ? '监控已暂停' : '等待添加组合' }}
       </span>
     </div>
     <form class="filters" @submit.prevent="search">
@@ -208,6 +215,9 @@ function pnlColor(value: number | null) {
         </select>
       </label>
       <div class="filter-actions">
+        <button type="button" class="btn" :disabled="!entries.length" @click="showRecent">
+          最近 24 小时
+        </button>
         <button type="submit" class="btn primary" :disabled="!entries.length">
           <Search />
           查询
@@ -296,8 +306,8 @@ function pnlColor(value: number | null) {
       </span>
       <span v-if="loading">正在读取本地记录</span>
       <span v-else-if="lastObserved">最近监控 {{ formatTradeTime(lastObserved) }}</span>
-      <span v-if="query">
-        {{ shanghaiDate(query.startTime) }} 至 {{ shanghaiDate(query.endTime) }}
+      <span>
+        {{ query === 'recent' ? '最近 24 小时' : `${shanghaiDate(query.startTime)} 至 ${shanghaiDate(query.endTime)}` }}
         <template v-if="loaded"> · 已加载 {{ rows.length }} 笔</template>
       </span>
       <button
@@ -311,7 +321,7 @@ function pnlColor(value: number | null) {
     </div>
   </section>
   <p v-if="entries.length" class="footnote">
-    {{ pinned ? '翻页期间保持当前结果，点击「查询」可刷新本地记录。' : '打开此页时记录新成交。日期查询和翻页读取本地已保存的记录。' }}
+    {{ pinned ? '翻页期间保持当前结果，点击「最近 24 小时」可恢复滚动显示。' : '打开此页时从币安同步最近 24 小时的公开成交。日期查询和翻页读取本地记录。' }}
   </p>
   <div v-if="opened" class="position-history">
     <ClosedPositions :entries="entries" :updated-at-by-id="updatedAtById" @quote="emit('quote', $event)" />

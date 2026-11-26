@@ -89,7 +89,7 @@ export function createObservedTrades(db) {
         for (const row of rows) {
           const time = timeOf(row?.orderUpdateTime)
           if (time < startTime || time > endTime) continue
-          const data = normalize(row, time)
+          let data = normalize(row, time)
           if (!(data.executedQty > 0) || !['BUY', 'SELL'].includes(data.side)
             || !['LONG', 'SHORT'].includes(data.positionSide)) continue
           let identity
@@ -107,9 +107,21 @@ export function createObservedTrades(db) {
             identity = ['row', tuple, occurrence]
           }
           const key = createHash('sha256').update(JSON.stringify([portfolioId, ...identity])).digest('hex')
-          const payload = JSON.stringify(data)
           const prior = find.get(portfolioId, key)
-          if (prior && (prior.time > time || prior.payload === payload)) continue
+          if (prior?.time > time) continue
+          if (prior && data.orderId != null) {
+            const previous = JSON.parse(prior.payload)
+            if (prior.time === time && previous.executedQty > data.executedQty) continue
+            const merged = { ...previous, ...data }
+            merged.orderTime ??= previous.orderTime
+            // Amounts on the older snapshot apply to its cumulative fill size.
+            if (previous.executedQty === data.executedQty) {
+              for (const field of weightFields) merged[field] ??= previous[field]
+            }
+            data = merged
+          }
+          const payload = JSON.stringify(data)
+          if (prior?.payload === payload) continue
           const { lastInsertRowid } = insert.run(portfolioId, key, time, payload)
           if (prior) supersede.run(lastInsertRowid, prior.revision)
           changed.set(key, { ...data, observedId: key })

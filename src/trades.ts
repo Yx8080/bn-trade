@@ -41,6 +41,7 @@ export interface ObservationStatus {
   portfolioId: string
   startedAt: number
   lastSuccessAt: number | null
+  syncing?: boolean
   lastPositionChangeAt?: number | null
   error: string
 }

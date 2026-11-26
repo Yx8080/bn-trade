@@ -49,6 +49,53 @@ const status = (lastSuccessAt, lastPositionChangeAt = null) => Response.json({ p
   portfolioId: '123', startedAt: Date.now(), lastSuccessAt, lastPositionChangeAt, error: '',
 }] })
 
+test('默认窗口跨日滚动 24 小时，翻页沿用原查询范围，手动搜索使用固定北京时间日期', async t => {
+  const day = 86_400_000
+  let now = Date.parse('2026-11-26T23:59:58+08:00')
+  const initial = now
+  let receivedAt = null
+  t.mock.method(Date, 'now', () => now)
+  const { history, calls, tick } = fixture(t, (path, params) => {
+    if (path === '/api/monitor/observe') return status(receivedAt)
+    if (params.has('cursor')) return Response.json({ list: [], total: 3 })
+    const records = [
+      { ...row('recent'), orderUpdateTime: initial },
+      { ...row('boundary'), orderUpdateTime: initial - day },
+      { ...row('expired'), orderUpdateTime: initial - day - 1 },
+    ].filter(record => record.orderUpdateTime >= Number(params.get('startTime')) &&
+      record.orderUpdateTime <= Number(params.get('endTime')))
+    return Response.json({ list: records, total: records.length, cursor: 'sqlite-snapshot' })
+  })
+  const bounds = () => {
+    const { params } = calls.findLast(call => call.path.endsWith('/trades'))
+    return [Number(params.get('startTime')), Number(params.get('endTime')), params.get('cursor')]
+  }
+  history.start()
+  await settle()
+  assert.deepEqual(bounds(), [initial - day, initial, null])
+  assert.deepEqual(history.tradeRecords.value.map(r => r.observedId), ['recent', 'boundary'])
+  now += 8_000
+  await tick()
+  assert.equal(history.today.value, '2026-11-27')
+  assert.equal(history.startDate.value, '2026-11-26')
+  assert.deepEqual(history.tradeRecords.value.map(r => r.observedId), ['recent'])
+  history.loadMore()
+  await settle()
+  assert.deepEqual(bounds(), [initial - day, initial, 'sqlite-snapshot'])
+  history.search()
+  await settle()
+  const manual = [Date.parse('2026-11-26T00:00:00+08:00'), Date.parse('2026-11-27T23:59:59.999+08:00'), null]
+  assert.deepEqual(bounds(), manual)
+  now += day
+  receivedAt = now
+  await tick()
+  assert.deepEqual(bounds(), manual)
+  history.showRecent()
+  await settle()
+  assert.deepEqual(bounds(), [now - day, now, null])
+  assert.equal(history.pinned.value, false)
+})
+
 test('可见期间建租约；历史查询、游标翻页和过期请求都不改变采集范围', async t => {
   const late = Promise.withResolvers()
   const historicalStart = Date.parse('2020-01-01T00:00:00+08:00')

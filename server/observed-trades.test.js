@@ -86,6 +86,30 @@ test('only explicitly disclosed position IDs associate an observed closing trade
   assert.equal(store.page(query).list.find(row => row.orderId === 'unrelated-order-id').positionId, undefined)
 })
 
+test('repeated order snapshots merge disclosures and keep one current row per portfolio and symbol', t => {
+  const db = createLocalOrderDb(':memory:')
+  t.after(() => db.close())
+  const store = db.observedTrades
+  const partial = { ...trade, side: 'SELL', orderId: '1', positionId: '2', quoteQuantity: 3000, totalPnl: 0 }
+  const [first] = store.record(owner, { ...query, rows: [partial] })
+  const update = { ...partial, positionId: null, orderTime: null, orderUpdateTime: 130, totalPnl: null }
+  const [merged] = store.record(owner, { ...query, rows: [update, update] })
+  assert.equal(merged.observedId, first.observedId)
+  assert.equal(merged.positionId, partial.positionId)
+  assert.equal(merged.orderTime, partial.orderTime)
+  assert.equal(merged.totalPnl, 0)
+  assert.deepEqual(store.record(owner, { ...query, rows: [partial, update] }), [])
+  const filled = { ...update, executedQty: '0.1', quoteQuantity: null }
+  store.record(owner, { ...query, rows: [filled, update, { ...partial, symbol: 'ETHUSDT' }] })
+  store.record('7', { ...query, rows: [partial] })
+  const result = store.page(query)
+  assert.equal(result.total, 2)
+  assert.deepEqual(result.list.map(row => [row.symbol, row.executedQty, row.quoteQuantity, row.totalPnl]), [
+    ['BTCUSDT', 0.1, null, null], ['ETHUSDT', 0.05, 3000, 0],
+  ])
+  assert.equal(store.page({ ...query, portfolioId: '7' }).total, 1)
+})
+
 test('only public fields persist across restart and invalid samples roll back atomically', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'bn-public-trades-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
