@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   Coin,
   EditPen,
+  Finished,
   FolderOpened,
   Link,
   List,
@@ -24,7 +25,7 @@ const {
   query,
   portfolios,
   error,
-  monitoring,
+  statusError,
   paging,
   loading,
   pinned,
@@ -37,15 +38,35 @@ const {
   stop,
   portfolioName: name,
 } = usePortfolioHistory(props.entries)
-const opened = ref(false)
-watch(
-  () => props.visible,
-  (visible) => {
-    if (!visible || opened.value) return
-    opened.value = true
-  },
-  { immediate: true },
-)
+const tabs = [
+  { id: 'trades', label: '开仓监控', icon: FolderOpened },
+  { id: 'closed', label: '已平仓位', icon: Finished },
+] as const
+type LedgerTab = (typeof tabs)[number]['id']
+const activeTab = ref<LedgerTab>('trades')
+const openedPositions = ref(false)
+
+function selectTab(id: LedgerTab) {
+  activeTab.value = id
+  if (id === 'closed') openedPositions.value = true
+}
+
+function navigateTabs(event: KeyboardEvent) {
+  const current = tabs.findIndex(tab => tab.id === activeTab.value)
+  let next: number
+  switch (event.key) {
+    case 'ArrowLeft': next = (current + tabs.length - 1) % tabs.length; break
+    case 'ArrowRight': next = (current + 1) % tabs.length; break
+    case 'Home': next = 0; break
+    case 'End': next = tabs.length - 1; break
+    default: return
+  }
+  event.preventDefault()
+  const id = tabs[next].id
+  selectTab(id)
+  const list = event.currentTarget as HTMLElement
+  list.querySelector<HTMLButtonElement>('#ledger-tab-' + id)?.focus()
+}
 let away = false
 function syncVisibility() {
   if (props.visible && !document.hidden && !away) start()
@@ -85,11 +106,11 @@ const loaded = computed(() => visiblePortfolios.value.some(portfolio => portfoli
 const failures = computed(() => visiblePortfolios.value.filter(portfolio => portfolio.error))
 const hasMore = computed(() => visiblePortfolios.value.some(portfolio => portfolio.nextPage))
 const observationFailures = computed(() => visiblePortfolios.value.filter(portfolio => portfolio.observation?.error))
-const syncing = computed(() => monitoring.value && visiblePortfolios.value.some(portfolio =>
-  !portfolio.observation || portfolio.observation.syncing))
+const monitoring = computed(() => visiblePortfolios.value.some(portfolio => portfolio.observation))
+const syncing = computed(() => visiblePortfolios.value.some(portfolio => portfolio.observation?.syncing))
 const lastObserved = computed(() => Math.max(0, ...visiblePortfolios.value.map(p => p.observation?.lastSuccessAt ?? 0)))
 const emptyState = computed(() => {
-  if (!props.entries.length) return { title: '尚未添加带单组合', detail: '添加组合后，打开本页即可开始监控。' }
+  if (!props.entries.length) return { title: '尚未添加带单组合', detail: '保存组合后，后台会自动采集公开成交。' }
   if (failures.value.length) return { title: '本地成交记录读取未完成', detail: '点击「最近 24 小时」或「查询」重新读取本地记录。' }
   if (!loaded.value && loading.value) return { title: '正在读取本地成交记录', detail: '' }
   if (hasMore.value) return { title: '当前结果没有可识别的开平仓成交', detail: '可继续加载更早的本地记录。' }
@@ -174,156 +195,165 @@ function pnlColor(value: number | null) {
     </section>
   </div>
 
-  <section class="panel ledger-card" aria-label="成交明细" :aria-busy="loading">
-    <div class="ledger-heading">
-      <div class="section-title">
-        <div class="title-icon"><FolderOpened /></div>
-        <h2>成交明细</h2>
+  <section class="panel ledger-card" aria-label="带单记录">
+    <div class="ledger-heading ledger-tab-header">
+      <div class="ledger-tabs" role="tablist" aria-label="带单记录" @keydown="navigateTabs">
+        <button v-for="tab in tabs" :id="'ledger-tab-' + tab.id" :key="tab.id" type="button" role="tab"
+          :aria-selected="activeTab === tab.id" :aria-controls="'ledger-panel-' + tab.id"
+          :tabindex="activeTab === tab.id ? 0 : -1" @click="selectTab(tab.id)">
+          <component :is="tab.icon" aria-hidden="true" />
+          {{ tab.label }}
+        </button>
       </div>
-      <span class="status" :class="{ active: monitoring && !observationFailures.length }">
+      <span class="status" :class="{ active: monitoring && !statusError && !observationFailures.length }">
         <i></i>
-        {{ monitoring && observationFailures.length ? '同步异常' : syncing ? '同步中' : monitoring ? '监控中' : entries.length ? '监控已暂停' : '等待添加组合' }}
+        {{ statusError ? '状态读取失败' : observationFailures.length ? '同步异常' : syncing ? '同步中' : monitoring ? '后台监控中' : entries.length ? '未加入后台监控' : '等待添加组合' }}
       </span>
     </div>
-    <form class="filters" @submit.prevent="search">
-      <label class="field">
-        <span>开始日期</span>
-        <input
-          v-model="startDate"
-          type="date"
-          :max="endDate || today"
-          required
-        />
-      </label>
-      <label class="field">
-        <span>结束日期</span>
-        <input
-          v-model="endDate"
-          type="date"
-          :min="startDate || undefined"
-          :max="today"
-          required
-        />
-      </label>
-      <label class="field">
-        <span>带单组合</span>
-        <select v-model="selected">
-          <option value="">全部组合</option>
-          <option v-for="item in entries" :key="item.id" :value="item.id">
-            {{ name(item.id) }}
-          </option>
-        </select>
-      </label>
-      <div class="filter-actions">
-        <button type="button" class="btn" :disabled="!entries.length" @click="showRecent">
-          最近 24 小时
-        </button>
-        <button type="submit" class="btn primary" :disabled="!entries.length">
-          <Search />
-          查询
+    <div v-show="activeTab === 'trades'" id="ledger-panel-trades" role="tabpanel"
+      aria-labelledby="ledger-tab-trades" :aria-busy="loading">
+      <form class="filters" @submit.prevent="search">
+        <label class="field">
+          <span>开始日期</span>
+          <input
+            v-model="startDate"
+            type="date"
+            :max="endDate || today"
+            required
+          />
+        </label>
+        <label class="field">
+          <span>结束日期</span>
+          <input
+            v-model="endDate"
+            type="date"
+            :min="startDate || undefined"
+            :max="today"
+            required
+          />
+        </label>
+        <label class="field">
+          <span>带单组合</span>
+          <select v-model="selected">
+            <option value="">全部组合</option>
+            <option v-for="item in entries" :key="item.id" :value="item.id">
+              {{ name(item.id) }}
+            </option>
+          </select>
+        </label>
+        <div class="filter-actions">
+          <button type="button" class="btn" :disabled="!entries.length" @click="showRecent">
+            最近 24 小时
+          </button>
+          <button type="submit" class="btn primary" :disabled="!entries.length">
+            <Search />
+            查询
+          </button>
+        </div>
+      </form>
+      <p v-if="error" class="notice error" role="alert">{{ error }}</p>
+      <p v-if="statusError" class="notice warning" role="status">后台监控状态读取失败。{{ statusError }}</p>
+      <p v-for="item in failures" :key="item.id" class="notice warning" role="status">
+        {{ name(item.id) }} · 本地记录读取失败。{{ item.error }}
+      </p>
+      <p v-for="item in observationFailures" :key="'observation:' + item.id" class="notice warning" role="status">
+        {{ name(item.id) }} · {{ item.observation?.error }}
+      </p>
+      <div class="table-scroll">
+        <table class="trades-table">
+          <thead>
+            <tr>
+              <th>交易对</th>
+              <th>方向</th>
+              <th class="numeric" title="开仓记录与未披露盈亏的平仓记录显示为 —">平仓盈亏</th>
+              <th>带单员</th>
+              <th class="numeric">成交均价</th>
+              <th class="numeric">成交数量</th>
+              <th class="numeric">总价值</th>
+              <th>更新时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in rows" :key="row.portfolioId + ':' + row.observedId">
+              <td>
+                <button
+                  v-if="typeof row.symbol === 'string' && row.symbol.endsWith('USDT')"
+                  class="text-button"
+                  :aria-label="'查看 ' + row.symbol + ' 合约行情'"
+                  @click="emit('quote', row.symbol)"
+                >
+                  {{ row.symbol }}
+                </button>
+                <strong v-else>{{ row.symbol }}</strong>
+              </td>
+              <td>
+                <span class="direction" :class="row.positionSide === 'LONG' ? 'long' : 'short'">
+                  {{ row.direction }}
+                </span>
+              </td>
+              <td class="numeric pnl-cell" :class="pnlColor(row.pnl)">
+                {{ row.pnl == null ? '—' : signed(row.pnl) }}
+                <small v-if="row.pnl != null">{{ row.quoteAsset }}</small>
+              </td>
+              <td>
+                <a
+                  class="trader-link"
+                  :href="detailUrl(row.portfolioId)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {{ name(row.portfolioId) }}
+                </a>
+              </td>
+              <td class="numeric">
+                {{ formatTradeAmount(row.avgPrice) }}
+                <small>{{ row.quoteAsset }}</small>
+              </td>
+              <td class="numeric">
+                {{ formatNumber(row.executedQty) }}
+                <small>{{ row.baseAsset }}</small>
+              </td>
+              <td class="numeric">
+                {{ formatTradeAmount(tradeValue(row.avgPrice, row.executedQty, row.quoteQuantity)) }}
+                <small>{{ row.quoteAsset }}</small>
+              </td>
+              <td class="time-cell">{{ formatTradeTime(row.orderUpdateTime) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-if="!rows.length" class="empty-state">
+        <span class="empty-icon"><List /></span>
+        <strong>{{ emptyState.title }}</strong>
+        <p v-if="emptyState.detail">{{ emptyState.detail }}</p>
+      </div>
+      <div class="ledger-footer">
+        <span>
+          <Timer />
+          北京时间 UTC+8
+        </span>
+        <span v-if="loading">正在读取本地记录</span>
+        <span v-else-if="lastObserved">最近监控 {{ formatTradeTime(lastObserved) }}</span>
+        <span>
+          {{ query === 'recent' ? '最近 24 小时' : `${shanghaiDate(query.startTime)} 至 ${shanghaiDate(query.endTime)}` }}
+          <template v-if="loaded"> · 已加载 {{ rows.length }} 笔</template>
+        </span>
+        <button
+          v-if="hasMore"
+          class="text-button"
+          :disabled="loading"
+          @click="loadMore(selected)"
+        >
+          {{ paging ? '正在加载更早成交…' : '加载更早成交' }}
         </button>
       </div>
-    </form>
-    <p v-if="error" class="notice error" role="alert">{{ error }}</p>
-    <p v-for="item in failures" :key="item.id" class="notice warning" role="status">
-      {{ name(item.id) }} · 本地记录读取失败。{{ item.error }}
-    </p>
-    <p v-for="item in observationFailures" :key="'observation:' + item.id" class="notice warning" role="status">
-      {{ name(item.id) }} · {{ item.observation?.error }}
-    </p>
-    <div class="table-scroll">
-      <table class="trades-table">
-        <thead>
-          <tr>
-            <th>交易对</th>
-            <th>方向</th>
-            <th class="numeric" title="开仓记录与未披露盈亏的平仓记录显示为 —">平仓盈亏</th>
-            <th>带单员</th>
-            <th class="numeric">成交均价</th>
-            <th class="numeric">成交数量</th>
-            <th class="numeric">总价值</th>
-            <th>更新时间</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="row in rows" :key="row.portfolioId + ':' + row.observedId">
-            <td>
-              <button
-                v-if="typeof row.symbol === 'string' && row.symbol.endsWith('USDT')"
-                class="text-button"
-                :aria-label="'查看 ' + row.symbol + ' 合约行情'"
-                @click="emit('quote', row.symbol)"
-              >
-                {{ row.symbol }}
-              </button>
-              <strong v-else>{{ row.symbol }}</strong>
-            </td>
-            <td>
-              <span class="direction" :class="row.positionSide === 'LONG' ? 'long' : 'short'">
-                {{ row.direction }}
-              </span>
-            </td>
-            <td class="numeric pnl-cell" :class="pnlColor(row.pnl)">
-              {{ row.pnl == null ? '—' : signed(row.pnl) }}
-              <small v-if="row.pnl != null">{{ row.quoteAsset }}</small>
-            </td>
-            <td>
-              <a
-                class="trader-link"
-                :href="detailUrl(row.portfolioId)"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                {{ name(row.portfolioId) }}
-              </a>
-            </td>
-            <td class="numeric">
-              {{ formatTradeAmount(row.avgPrice) }}
-              <small>{{ row.quoteAsset }}</small>
-            </td>
-            <td class="numeric">
-              {{ formatNumber(row.executedQty) }}
-              <small>{{ row.baseAsset }}</small>
-            </td>
-            <td class="numeric">
-              {{ formatTradeAmount(tradeValue(row.avgPrice, row.executedQty, row.quoteQuantity)) }}
-              <small>{{ row.quoteAsset }}</small>
-            </td>
-            <td class="time-cell">{{ formatTradeTime(row.orderUpdateTime) }}</td>
-          </tr>
-        </tbody>
-      </table>
     </div>
-    <div v-if="!rows.length" class="empty-state">
-      <span class="empty-icon"><List /></span>
-      <strong>{{ emptyState.title }}</strong>
-      <p v-if="emptyState.detail">{{ emptyState.detail }}</p>
-    </div>
-    <div class="ledger-footer">
-      <span>
-        <Timer />
-        北京时间 UTC+8
-      </span>
-      <span v-if="loading">正在读取本地记录</span>
-      <span v-else-if="lastObserved">最近监控 {{ formatTradeTime(lastObserved) }}</span>
-      <span>
-        {{ query === 'recent' ? '最近 24 小时' : `${shanghaiDate(query.startTime)} 至 ${shanghaiDate(query.endTime)}` }}
-        <template v-if="loaded"> · 已加载 {{ rows.length }} 笔</template>
-      </span>
-      <button
-        v-if="hasMore"
-        class="text-button"
-        :disabled="loading"
-        @click="loadMore(selected)"
-      >
-        {{ paging ? '正在加载更早成交…' : '加载更早成交' }}
-      </button>
+    <div v-show="activeTab === 'closed'" id="ledger-panel-closed" role="tabpanel" aria-labelledby="ledger-tab-closed">
+      <ClosedPositions v-if="openedPositions" :entries="entries" :updated-at-by-id="updatedAtById"
+        @quote="emit('quote', $event)" />
     </div>
   </section>
-  <p v-if="entries.length" class="footnote">
-    {{ pinned ? '翻页期间保持当前结果，点击「最近 24 小时」可恢复滚动显示。' : '打开此页时从币安同步最近 24 小时的公开成交。日期查询和翻页读取本地记录。' }}
+  <p v-if="entries.length && activeTab === 'trades'" class="footnote">
+    {{ pinned ? '翻页期间保持当前结果，点击「最近 24 小时」可恢复滚动显示。' : '成交由服务在后台同步，本页从 SQLite 读取记录。' }}
   </p>
-  <div v-if="opened" class="position-history">
-    <ClosedPositions :entries="entries" :updated-at-by-id="updatedAtById" @quote="emit('quote', $event)" />
-  </div>
 </template>

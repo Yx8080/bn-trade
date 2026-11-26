@@ -17,7 +17,7 @@ export function createConfiguredVerifier(env, environment) {
     const pending = (async () => {
       const allowed = accounts.bindingMarkets(environment, pair.apiKey)
       const markets = pair.markets.filter(market => !allowed || allowed.includes(market))
-      const identity = await verifyAccountIdentity(env, environment, pair, markets)
+      const identity = await verifyAccountIdentity(env, pair, markets)
       return accounts.bind(environment, { ...pair, ...identity }, { id: user.id, markets })
     })()
     cache.set(scope, pending)

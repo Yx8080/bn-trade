@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import type { LeadPortfolio } from './portfolios'
-import { DAY_MS, fetchObservedTrades, observePortfolios, releaseObservation, shanghaiDate, tradeDirection,
+import { DAY_MS, fetchObservationStatus, fetchObservedTrades, shanghaiDate, tradeDirection,
   type ObservedTrade, type ObservationStatus, type TradeQuery } from './trades'
 
 interface PortfolioResult {
@@ -19,15 +19,6 @@ type DateRange = Pick<TradeQuery, 'startTime' | 'endTime'>
 const dayStart = (date: string) => Date.parse(date + 'T00:00:00+08:00')
 const errorMessage = (cause: unknown) => cause instanceof Error ? cause.message : '暂时无法连接本地服务。'
 
-function newViewId() {
-  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
-  const bytes = crypto.getRandomValues(new Uint8Array(16))
-  bytes[6] = (bytes[6] & 15) | 64
-  bytes[8] = (bytes[8] & 63) | 128
-  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
-  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-')
-}
-
 export function usePortfolioHistory(entries: LeadPortfolio[]) {
   const now = ref(Date.now())
   const today = computed(() => shanghaiDate(now.value))
@@ -40,7 +31,7 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
   const names = new Map(entries.filter(entry => entry.name).map(entry => [entry.id, entry.name]))
   const portfolioName = (id: string) => names.get(id) ?? id
   const error = ref('')
-  const monitoring = ref(false)
+  const statusError = ref('')
   const pinnedAt = ref<number>()
   const pinned = computed(() => pinnedAt.value !== undefined)
   const loading = computed(() => portfolios.value.some(p => p.loading))
@@ -61,7 +52,6 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
 
   let reads = new AbortController()
   let visit: AbortController | undefined
-  const activeViewIds = new Set<string>()
   let timer: number | undefined
 
   async function read(portfolio: PortfolioResult, more = false) {
@@ -162,45 +152,34 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
     if (visit || !entries.length) return
     const controller = new AbortController()
     visit = controller
-    const groups: { id: string; items: PortfolioResult[] }[] = []
+    const groups: PortfolioResult[][] = []
     for (let i = 0; i < portfolios.value.length; i += 100) {
-      groups.push({ id: newViewId(), items: portfolios.value.slice(i, i + 100) })
+      groups.push(portfolios.value.slice(i, i + 100))
     }
-    monitoring.value = true
     updateClock()
     if (!pinned.value) for (const portfolio of portfolios.value) void read(portfolio)
 
-    async function heartbeat() {
+    async function refreshStatus() {
       if (controller.signal.aborted) return
       updateClock()
-      await Promise.all(groups.map(async group => {
-        try {
-          activeViewIds.add(group.id)
-          const statuses = await observePortfolios(group.id, group.items.map(p => p.id), controller.signal)
-          if (controller.signal.aborted) return
-          const byId = new Map(statuses.map(status => [status.portfolioId, status]))
-          for (const portfolio of group.items) {
-            const status = byId.get(portfolio.id)
-            if (!status) throw Error('服务未能确认组合的监控状态。')
-            portfolio.observation = status
-            if (!pinned.value && status.lastSuccessAt && status.lastSuccessAt !== portfolio.refreshedAt &&
-              (query.value === 'recent' || query.value.endTime >= status.startedAt - DAY_MS)) void read(portfolio)
-          }
-        } catch (cause) {
-          if (controller.signal.aborted) return
-          releaseObservation(group.id)
-          activeViewIds.delete(group.id)
-          group.id = newViewId()
-          for (const portfolio of group.items) {
-            portfolio.observation = { portfolioId: portfolio.id, startedAt: portfolio.observation?.startedAt ?? 0,
-              lastSuccessAt: portfolio.observation?.lastSuccessAt ?? null,
-              lastPositionChangeAt: portfolio.observation?.lastPositionChangeAt, error: errorMessage(cause) }
-          }
+      const results = await Promise.allSettled(groups.map(async group => {
+        const statuses = await fetchObservationStatus(group.map(p => p.id), controller.signal)
+        if (controller.signal.aborted) return
+        const byId = new Map(statuses.map(status => [status.portfolioId, status]))
+        for (const portfolio of group) {
+          const status = byId.get(portfolio.id)
+          portfolio.observation = status
+          if (!pinned.value && status?.lastSuccessAt && status.lastSuccessAt !== portfolio.refreshedAt &&
+            (query.value === 'recent' || query.value.endTime >= status.startedAt - DAY_MS)) void read(portfolio)
         }
       }))
-      if (!controller.signal.aborted) timer = window.setTimeout(heartbeat, 8_000)
+      if (!controller.signal.aborted) {
+        const failed = results.find(result => result.status === 'rejected')
+        statusError.value = failed ? errorMessage(failed.reason) : ''
+        timer = window.setTimeout(refreshStatus, 8_000)
+      }
     }
-    void heartbeat()
+    void refreshStatus()
   }
 
   function stop() {
@@ -208,12 +187,10 @@ export function usePortfolioHistory(entries: LeadPortfolio[]) {
     visit = undefined
     window.clearTimeout(timer)
     cancelReads()
-    for (const id of activeViewIds) releaseObservation(id)
-    activeViewIds.clear()
-    monitoring.value = false
+    statusError.value = ''
     for (const portfolio of portfolios.value) portfolio.observation = undefined
   }
 
-  return { startDate, endDate, today, query, portfolios, error, monitoring, paging, loading,
+  return { startDate, endDate, today, query, portfolios, error, statusError, paging, loading,
     pinned, tradeRecords, updatedAtById, search, showRecent, loadMore, start, stop, portfolioName }
 }

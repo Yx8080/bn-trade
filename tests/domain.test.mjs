@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { fetchObservedTrades, fetchClosedPositions, observePortfolios, releaseObservation, formatTradeAmount, TradeRequestError } from '../src/trades.ts'
-import { linearPnl, reportedPnl, summarizeReportedPnl } from '../src/pnl.ts'
+import { fetchObservedTrades, fetchClosedPositions, fetchObservationStatus, saveMonitoredPortfolios, formatTradeAmount, TradeRequestError } from '../src/trades.ts'
+import { linearPnl, linearPnlFromMargin, reportedPnl, summarizeReportedPnl } from '../src/pnl.ts'
 import { loadWatchlist, saveWatchlist } from '../src/portfolios.ts'
 
 test('成交金额按绝对值选择显示精度，披露盈亏在汇总后取舍小数', () => {
@@ -71,6 +71,20 @@ test('线性合约的多空方向相反，按数量和价差计算毛盈亏', ()
   assert.equal(linearPnl('LONG', NaN, 90, 3), null)
 })
 
+test('按保证金和杠杆试算线性合约盈亏及回报率', () => {
+  assert.deepEqual(linearPnlFromMargin('LONG', 100, 110, 100, 5), { pnl: 50, roi: 0.5 })
+  assert.deepEqual(linearPnlFromMargin('LONG', 100, 110, 200, 5), { pnl: 100, roi: 0.5 })
+  assert.deepEqual(linearPnlFromMargin('SHORT', 100, 110, 100, 5), { pnl: -50, roi: -0.5 })
+  assert.deepEqual(linearPnlFromMargin('SHORT', 100, 90, 100, 5), { pnl: 50, roi: 0.5 })
+  assert.deepEqual(linearPnlFromMargin('LONG', 100, 1000, 20, 50), { pnl: 9000, roi: 450 })
+  assert.deepEqual(linearPnlFromMargin('LONG', 100, 100, 100, 5), { pnl: 0, roi: 0 })
+  assert.equal(linearPnlFromMargin('LONG', 100, 110, 0, 5), null)
+  assert.equal(linearPnlFromMargin('LONG', 100, 0, 100, 5), null)
+  assert.equal(linearPnlFromMargin('LONG', 0, 110, 100, 5), null)
+  assert.equal(linearPnlFromMargin('LONG', 100, 110, 100, 1.5), null)
+  assert.equal(linearPnlFromMargin('LONG', 100, 110, Number.MAX_VALUE, 5), null)
+})
+
 test('完整仓位按本地记录分页，保留结算币种与未披露盈亏', async t => {
   const position = { symbol: 'ETHUSDT', positionId: '1173503880041443328', asset: 'USDT',
     side: 'Long', closed: 1795445614673, roi: 0.03 }
@@ -88,18 +102,20 @@ test('完整仓位按本地记录分页，保留结算币种与未披露盈亏',
     [['1173503880041443328', -14523.75111698, 'USDT'], ['2', null, 'USDT']])
 })
 
-test('监控只发送当前访问和组合，关闭访问释放租约', async t => {
-  const calls = []
-  t.mock.method(globalThis, 'fetch', (url, init) => {
-    calls.push([url, JSON.parse(init.body)])
-    if (url.endsWith('/release')) assert.equal(init.keepalive, true)
-    return Promise.resolve(Response.json({ portfolios: [] }))
+test('组合状态只读，保存操作单独提交后台组合配置', async t => {
+  const fetchMock = t.mock.method(globalThis, 'fetch', (url, init) => {
+    if (url.startsWith('/api/monitor/status')) return Response.json({ portfolios: [] })
+    assert.equal(init.method, 'PUT')
+    assert.deepEqual(JSON.parse(init.body), { portfolioIds: ['123'] })
+    assert.equal(init.headers.get('Authorization'), 'Bearer session-fixture')
+    return new Response(null, { status: 204 })
   })
-  const viewId = crypto.randomUUID()
-  await observePortfolios(viewId, ['123'], new AbortController().signal)
-  releaseObservation(viewId)
+  await fetchObservationStatus(['123'], new AbortController().signal)
+  await saveMonitoredPortfolios(['123'], 'session-fixture')
+  const calls = fetchMock.mock.calls.map(({ arguments: [url, init] }) => [url, init.method, init.body])
   assert.deepEqual(calls, [
-    ['/api/monitor/observe', { viewId, portfolioIds: ['123'] }], ['/api/monitor/release', { viewId }],
+    ['/api/monitor/status?portfolioId=123', undefined, undefined],
+    ['/api/monitor/watchlist', 'PUT', '{"portfolioIds":["123"]}'],
   ])
 })
 

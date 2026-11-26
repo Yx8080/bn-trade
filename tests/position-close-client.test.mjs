@@ -26,7 +26,7 @@ test('数量校验使用精确小数，允许整仓数量并拦截超仓、步�
 })
 
 const order = {
-  environment: 'testnet', symbol: 'BTCUSDT', positionSide: 'BOTH', direction: 'SHORT',
+  environment: 'live', symbol: 'BTCUSDT', positionSide: 'BOTH', direction: 'SHORT',
   expectedQuantity: '0.135', expectedUpdateTime: 1700000000000, quantity: '0.03', clientOrderId: 'close-short-btc',
 }
 
@@ -37,16 +37,16 @@ test('部分平仓传入所选仓位快照，仓位过期时返回服务端拒�
     const url = new URL(path, 'http://localhost')
     assert.equal(url.pathname, '/api/futures/close-position')
     assert.equal(init.headers.get('Authorization'), 'Bearer test-token')
-    assert.equal(init.headers.get('X-Trading-Environment'), 'testnet')
+    assert.equal(init.headers.get('X-Trading-Environment'), 'live')
     if (init.method === 'GET') {
       assert.equal(url.searchParams.get('symbol'), 'BTCUSDT')
-      return Response.json({ ...rules, environment: 'testnet', symbol: 'BTCUSDT', baseAsset: 'BTC' })
+      return Response.json({ ...rules, environment: 'live', symbol: 'BTCUSDT', baseAsset: 'BTC' })
     }
     assert.equal(init.method, 'POST')
     assert.deepEqual(JSON.parse(init.body), order)
     return Response.json({ code: 'POSITION_CHANGED', message: '持仓已变化' }, { status: 409 })
   })
-  const limits = await getClosePositionRules('test-token', 'BTCUSDT', 'testnet')
+  const limits = await getClosePositionRules('test-token', 'BTCUSDT', 'live')
   assert.equal(limits.stepSize, rules.stepSize)
   await assert.rejects(closePosition('test-token', order), { code: 'POSITION_CHANGED', status: 409 })
   assert.deepEqual(calls, ['GET', 'POST'])

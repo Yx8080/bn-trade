@@ -1,27 +1,12 @@
-export type Environment = 'testnet' | 'live'
+import type { CopyLeverageOverrides } from '../shared/leverage.js'
+
+export const tradingEnvironment = 'live'
+export type Environment = typeof tradingEnvironment
 export type FuturesPositionMode = 'oneWay' | 'hedge'
 type Market = 'spot' | 'futures'
 type PositionSide = 'BOTH' | 'LONG' | 'SHORT'
 type Side = 'BUY' | 'SELL'
 type OrderType = 'MARKET' | 'LIMIT'
-
-const environmentKey = 'bn-trade:environment'
-function initialEnvironment(): Environment {
-  try { return window.sessionStorage.getItem(environmentKey) === 'live' ? 'live' : 'testnet' }
-  catch { return 'testnet' }
-}
-
-let selectedEnvironment = initialEnvironment()
-export function getSelectedEnvironment(): Environment {
-  return selectedEnvironment
-}
-
-export function selectEnvironment(environment: Environment) {
-  if (environment !== 'live' && environment !== 'testnet') throw Error('交易环境无效。')
-  selectedEnvironment = environment
-  try { window.sessionStorage.setItem(environmentKey, environment) }
-  catch { /* The choice still applies to this page when storage is unavailable. */ }
-}
 
 export interface FuturesSession {
   id: string
@@ -31,7 +16,7 @@ export interface FuturesSession {
 
 export interface BoundSession extends FuturesSession {
   uid: string
-  issuer: 'live' | 'demo' | 'spot-testnet'
+  issuer: 'live'
   previousWorkspaceId?: string
   markets: Market[]
   expiresAt: number
@@ -45,7 +30,7 @@ export interface BindingInput {
 
 export interface CopyConfig {
   portfolioIds: string[]
-  leverage: number | null
+  leverage: number | 'max' | CopyLeverageOverrides | null
   sizingMode: 'margin' | 'equityPercent' | 'notional'
   amount: number
   repeat: 'first' | 'fixed'
@@ -250,12 +235,12 @@ export function setUnauthorizedHandler(handler?: (token: string) => void) {
 }
 
 function environmentChanged() {
-  return new FuturesError('ENVIRONMENT_CHANGED', 409, '交易环境已切换，请在当前环境重新确认。')
+  return new FuturesError('ENVIRONMENT_CHANGED', 409, '请求与实盘环境不一致，请重新确认。')
 }
 
 async function request<T>(path: string, token?: string, signal?: AbortSignal, body?: OrderIntent | CopyCommand,
-  environment = selectedEnvironment): Promise<T> {
-  if (body && body.environment !== environment) throw environmentChanged()
+  environment = tradingEnvironment): Promise<T> {
+  if (environment !== tradingEnvironment || (body && body.environment !== tradingEnvironment)) throw environmentChanged()
   const headers = new Headers({ Accept: 'application/json', 'X-Trading-Environment': environment })
   if (token) headers.set('Authorization', 'Bearer ' + token)
   if (body) headers.set('Content-Type', 'application/json')
@@ -296,9 +281,8 @@ export const getSession = (token: string, signal?: AbortSignal) =>
   request<FuturesSession>('futures/session', token, signal)
 
 export async function getBindingEnvironment(signal?: AbortSignal): Promise<Environment> {
-  const expected = selectedEnvironment
   const result = await request<{ environment: Environment; credentialStorage?: string; identity?: string }>('accounts/bind', undefined, signal)
-  if (result?.environment !== expected || selectedEnvironment !== expected) throw environmentChanged()
+  if (result?.environment !== tradingEnvironment) throw environmentChanged()
   if (result.credentialStorage !== 'memory' || result.identity !== 'binance-uid') {
     throw new FuturesError('INCOMPATIBLE_BINDING', 409, '当前后端未确认支持内存密钥和币安 UID。请使用新版代码重启交易服务，再点击重试。')
   }
@@ -306,7 +290,7 @@ export async function getBindingEnvironment(signal?: AbortSignal): Promise<Envir
 }
 
 export async function bindAccount(input: BindingInput): Promise<BoundSession & { token: string }> {
-  if (input.environment !== selectedEnvironment) throw environmentChanged()
+  if (input.environment !== tradingEnvironment) throw environmentChanged()
   if (typeof window !== 'undefined' && !window.isSecureContext)
     throw Error('请使用 HTTPS 或本机 localhost 地址绑定密钥。')
   let response: Response
@@ -337,20 +321,20 @@ export async function bindAccount(input: BindingInput): Promise<BoundSession & {
   if (data?.environment !== input.environment || typeof data.token !== 'string' || !data.token ||
     typeof data.id !== 'string' || !data.id || typeof data.name !== 'string' || !data.name ||
     typeof data.uid !== 'string' || !/^[1-9]\d{0,19}$/.test(data.uid) ||
-    (input.environment === 'live' ? data.issuer !== 'live' || data.id !== 'uid:' + data.uid
-      : !['demo', 'spot-testnet'].includes(data.issuer) || data.id !== 'uid:' + data.issuer + ':' + data.uid) ||
+    data.issuer !== 'live' || data.id !== 'uid:' + data.uid ||
     !Number.isSafeInteger(data.expiresAt) || data.expiresAt <= Date.now() ||
     !Array.isArray(data.markets) || !data.markets.length || !data.markets.every((market: unknown) => market === 'futures' || market === 'spot')) {
-    if (typeof data?.token === 'string' && data.token) void revokeSession(data.token, input.environment).catch(() => {})
+    if (typeof data?.token === 'string' && data.token) void revokeSession(data.token).catch(() => {})
     throw Error('交易服务返回了无效的会话信息，请重新绑定。')
   }
   const { environment, id, uid, issuer, name, markets, expiresAt, token, previousWorkspaceId } = data
   return { environment, id, uid, issuer, name, markets, expiresAt, token,
-    ...(environment === 'live' && typeof previousWorkspaceId === 'string' && /^bound-[a-f0-9]{64}$/.test(previousWorkspaceId)
+    ...(typeof previousWorkspaceId === 'string' && /^bound-[a-f0-9]{64}$/.test(previousWorkspaceId)
       ? { previousWorkspaceId } : {}) }
 }
 
-export async function revokeSession(token: string, environment = selectedEnvironment) {
+export async function revokeSession(token: string) {
+  const environment = tradingEnvironment
   const response = await fetch('/api/accounts/session', {
     method: 'DELETE', headers: { Authorization: 'Bearer ' + token, 'X-Trading-Environment': environment },
     redirect: 'error', cache: 'no-store', keepalive: true,
@@ -387,10 +371,9 @@ export const getAccount = (token: string, signal?: AbortSignal) =>
   request<FuturesAccount>('futures/account', token, signal)
 
 export async function getFuturesPositionMode(token: string, environment: Environment, signal?: AbortSignal): Promise<FuturesPositionMode> {
-  if (environment !== selectedEnvironment) throw environmentChanged()
   const result = await request<{ environment: Environment; mode: FuturesPositionMode }>(
     'futures/position-mode', token, signal, undefined, environment)
-  if (result?.environment !== environment || environment !== selectedEnvironment) throw environmentChanged()
+  if (result?.environment !== environment) throw environmentChanged()
   if (result.mode !== 'oneWay' && result.mode !== 'hedge') throw Error('币安账户持仓模式无效。')
   return result.mode
 }
@@ -411,18 +394,24 @@ export const getManualOrderSize = (token: string, input: {
   side?: Side; positionSide?: PositionSide
 }, signal?: AbortSignal) => request<ManualOrderSize>('futures/order-size?' + new URLSearchParams(input), token, signal)
 
-export interface SymbolLeverage {
+export interface SymbolLeverageLimit {
   symbol: string
   environment: Environment
-  leverage: number | null
   symbolMaxLeverage: number
+}
+export interface SymbolLeverage extends SymbolLeverageLimit {
+  leverage: number | null
   maxLeverage: number | null
   exposure: string | null
   brackets: { cap: string; leverage: number }[]
 }
-export const getFuturesLeverage = (token: string, symbol: string, signal?: AbortSignal) =>
+export const getFuturesLeverage = (token: string, symbol: string, signal?: AbortSignal, environment?: Environment) =>
   request<SymbolLeverage>(
-    'futures/leverage?' + new URLSearchParams({ symbol }), token, signal)
+    'futures/leverage?' + new URLSearchParams({ symbol }), token, signal, undefined, environment)
+
+export const getPublicFuturesLeverage = (symbol: string, environment: Environment, signal?: AbortSignal) =>
+  request<SymbolLeverageLimit>(
+    'futures/leverage-limit?' + quoteQuery(symbol, environment), undefined, signal, undefined, environment)
 
 export const getSpotAccount = (token: string, signal?: AbortSignal) =>
   request<SpotAccount>('spot/account', token, signal)
@@ -443,10 +432,9 @@ export const submitOrder = (token: string, input: OrderInput, signal?: AbortSign
   request<OrderResult>('futures/orders', token, signal, input)
 
 export async function getClosePositionRules(token: string, symbol: string, environment: Environment, signal?: AbortSignal) {
-  if (environment !== selectedEnvironment) throw environmentChanged()
   const rules = await request<ClosePositionRules>('futures/close-position?' + new URLSearchParams({ symbol }),
     token, signal, undefined, environment)
-  if (rules?.environment !== environment || selectedEnvironment !== environment) throw environmentChanged()
+  if (rules?.environment !== environment) throw environmentChanged()
   const decimal = (value: unknown) => typeof value === 'string' && /^\d{1,20}(?:\.\d{1,18})?$/.test(value)
   if (rules.symbol !== symbol || typeof rules.baseAsset !== 'string' || !rules.baseAsset.trim() ||
     !decimal(rules.stepSize) || !/[1-9]/.test(rules.stepSize) || !decimal(rules.minQty) ||

@@ -8,7 +8,7 @@ import { accountBinding } from './account-binding.js'
 import { createCopyService } from './copy-service.js'
 import { createPlatformSettlement } from './platform-settlement.js'
 
-const input = { environment: 'testnet', apiKey: 'synthetic-key', apiSecret: 'synthetic-secret' }
+const input = { environment: 'live', apiKey: 'synthetic-key', apiSecret: 'synthetic-secret' }
 function request(path, { method = 'GET', data, token, headers = {} } = {}) {
   return new Request('http://localhost/api/' + path, { method, headers: {
     'Content-Type': 'application/json', ...(token && { Authorization: 'Bearer ' + token }), ...headers,
@@ -41,7 +41,7 @@ test('binding signs read-only account probes and scopes/revokes a new session wi
   const session = await res.json()
   assert.deepEqual(session.markets, ['spot'])
   assert.equal(session.uid, '31415')
-  assert.deepEqual(calls.sort(), ['https://demo-fapi.binance.com/fapi/v3/account', 'https://testnet.binance.vision/api/v3/account'])
+  assert.deepEqual(calls.sort(), ['https://api.binance.com/api/v3/account', 'https://fapi.binance.com/fapi/v3/account'])
   assert.ok(!JSON.stringify(session).includes(input.apiKey) && !JSON.stringify(session).includes(input.apiSecret))
   assert.equal((await worker.fetch(request('spot/account', session), env)).status, 200)
   assert.equal((await worker.fetch(request('futures/account', session), env)).status, 503)
@@ -60,8 +60,8 @@ test('binding signs read-only account probes and scopes/revokes a new session wi
 test('environment confirmation, browser transport, invalid/missing credentials and exchange failures leave no binding', async t => {
   const env = { orderStore: dbFor(t), fetchBinance: () => { throw Error('unexpected') } }
   const get = await accountBinding(request('accounts/bind'), env)
-  assert.deepEqual(await get.json(), { environment: 'testnet', credentialStorage: 'memory', identity: 'binance-uid' })
-  assert.equal((await bind(env, { ...input, environment: 'live' })).status, 409)
+  assert.deepEqual(await get.json(), { environment: 'live', credentialStorage: 'memory', identity: 'binance-uid' })
+  assert.equal((await bind(env, { ...input, environment: 'testnet' })).status, 409)
   for (const identity of ['key-hash', '', null]) {
     const response = await bind(env, { ...input, identity })
     assert.equal(response.status, 409)
@@ -81,9 +81,8 @@ test('environment confirmation, browser transport, invalid/missing credentials a
     assert.equal(error.code, code)
     assert.ok(!JSON.stringify(error).includes(input.apiSecret))
   }
-  assert.equal(env.orderStore.accounts.hasAccounts('testnet'), false)
+  assert.equal(env.orderStore.accounts.hasAccounts('live'), false)
 })
-
 test('independent legacy keys resume their own markets and cannot operate the other key’s strategy', async t => {
   const legacy = { id: 'old-owner', name: '已有账户', token: 'legacy', apiKey: input.apiKey, apiSecret: input.apiSecret,
     spotApiKey: 'legacy-spot-key', spotApiSecret: 'legacy-spot-secret' }
@@ -124,11 +123,11 @@ test('a disconnected bound account can settle a platform spot order without admi
   } }
   const session = await (await bind(env)).json()
   assert.equal((await worker.fetch(request('spot/orders', { ...session, method: 'POST', data: {
-    environment: 'testnet', quoteOrderQty: '20', symbol: 'BTCUSDT', clientOrderId: 'spot-fixture' } }), env)).status, 201)
+    environment: 'live', quoteOrderQty: '20', symbol: 'BTCUSDT', clientOrderId: 'spot-fixture' } }), env)).status, 201)
   await accountBinding(request('accounts/session', { ...session, method: 'DELETE' }), env)
   const settlement = createPlatformSettlement(env)
   try { await settlement.poll() } finally { await settlement.close() }
-  const report = env.orderStore.platform.report('testnet', session.id)
+  const report = env.orderStore.platform.report('live', session.id)
   assert.equal(report.pendingCount, 0)
   assert.equal(report.rows[0].quantity, 2)
   assert.equal(report.totals[0].fees, 0.01)
@@ -162,22 +161,4 @@ test('signed account read must disclose a valid UID even when futures access has
   env.fetchBinance = url => Response.json(url.pathname === '/fapi/v3/account' ? { assets: [], uid: 51 } : { balances: [], uid: 52 })
   assert.equal((await (await bind(env, { ...input, environment: 'live' })).json()).code, 'UID_MISMATCH')
   assert.equal(env.orderStore.accounts.hasAccounts('live'), false)
-})
-
-test('testnet issuer follows the actual trading venue and Demo identity never grants Spot Test Network access', async t => {
-  const env = { orderStore: dbFor(t), fetchBinance(url, init) {
-    const key = init.headers.get('X-MBX-APIKEY')
-    if (url.hostname === 'testnet.binance.vision' && key === 'demo-account') return denied()
-    if (url.hostname === 'demo-fapi.binance.com') return key === 'spot-network-account' ? denied() : Response.json({ assets: [] })
-    assert.equal(url.pathname, '/api/v3/account')
-    assert.ok(['testnet.binance.vision', 'demo-api.binance.com'].includes(url.hostname))
-    return Response.json({ balances: [], uid: 4567 })
-  } }
-  const demo = await (await bind(env, { ...input, apiKey: 'demo-account' })).json()
-  const spot = await (await bind(env, { ...input, apiKey: 'spot-network-account' })).json()
-  assert.deepEqual(demo.markets, ['futures'])
-  assert.deepEqual(spot.markets, ['spot'])
-  assert.equal(demo.uid, spot.uid)
-  assert.notEqual(demo.id, spot.id)
-  assert.equal((await (await bind(env, { ...input, apiKey: 'ambiguous' })).json()).code, 'UID_MISMATCH')
 })

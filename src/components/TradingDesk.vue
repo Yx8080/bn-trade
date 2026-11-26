@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Search, Refresh, Tickets, TrendCharts } from '@element-plus/icons-vue'
+import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
+import { DataAnalysis, Search, Refresh, Tickets, TrendCharts } from '@element-plus/icons-vue'
 import { getQuote, getSpotQuote, type BoundSession, type CopyConfig, type Environment } from '../futures'
 import { subscribeMarketQuote } from '../market-stream'
 import { useTradingAccount } from '../useTradingAccount'
+import { useFuturesLeverage } from '../useFuturesLeverage'
 import type { LeadPortfolio } from '../portfolios'
 import { formatNumber, formatTradeTime } from '../trades'
+import { isAppLeverage, MIN_LEVERAGE } from '../../shared/leverage.js'
 import OrderTicket from './OrderTicket.vue'
 import AccountOverview from './AccountOverview.vue'
 import PositionPnlEstimate from './PositionPnlEstimate.vue'
@@ -38,6 +40,31 @@ const manualVisited = ref(manual.value)
 watch(manual, selected => { if (selected) manualVisited.value = true })
 const pageVisible = ref(!document.hidden)
 const activeSession = computed(() => props.session?.environment === props.environment ? props.session : null)
+const orderTicket = useTemplateRef('orderTicket')
+const pnlDraft = ref<{ entry: string; margin: string; leverage: number } | null>(null)
+const { info: leverageInfo, publicMaxLeverage, error: leverageError, loading: leverageLoading, refresh: refreshLeverage } =
+  useFuturesLeverage(() => futures.value && (manual.value || pnlDraft.value) ? symbol.value : '',
+    () => activeSession.value, () => props.token, () => props.environment)
+const currentLeverage = computed(() => leverageInfo.value?.leverage ?? undefined)
+const symbolMaxLeverage = computed(() => leverageInfo.value?.symbolMaxLeverage ?? publicMaxLeverage.value)
+const orderMaxLeverage = computed(() => leverageInfo.value?.maxLeverage ?? symbolMaxLeverage.value)
+
+function freshPrice() {
+  return quoteSource.value === props.environment && lastTradeTime.value > 0
+    && Math.abs(Date.now() - lastTradeTime.value) < 60_000 ? price.value : ''
+}
+
+function openPnl() {
+  const defaults = manual.value ? orderTicket.value?.pnlDefaults() : undefined
+  const leverage = defaults?.leverage ?? currentLeverage.value
+  pnlDraft.value = {
+    entry: defaults?.entry || freshPrice(),
+    margin: defaults?.margin ?? '',
+    leverage: leverage != null && isAppLeverage(leverage, symbolMaxLeverage.value) ? leverage : MIN_LEVERAGE,
+  }
+}
+
+watch(symbol, () => { pnlDraft.value = null })
 const { account, spotAccount, fetchedAt, loading: loadingAccount, error: accountError, funds, refreshAccount } =
   useTradingAccount(() => props.market, () => activeSession.value, () => props.token)
 const orderQuoteTime = computed(() => futures.value ? Math.min(lastQuote.value, lastTradeTime.value) : lastTradeTime.value)
@@ -144,7 +171,7 @@ watch(
               <small>/ USDT</small>
             </strong>
             <span>
-              {{ futures ? '永续合约' : '现货' }} · {{ environment === 'live' ? '实盘' : '测试网' }}
+              {{ futures ? '永续合约' : '现货' }} · 实盘
             </span>
           </div>
           <div class="quote-label">最新价格</div>
@@ -168,19 +195,18 @@ watch(
           </div>
         </div>
         <p v-if="quoteError" class="notice error" role="status">{{ quoteError }}</p>
-        <PositionPnlEstimate
-          v-if="futures"
-          :key="symbol"
-          :symbol="symbol"
-          :mark-price="quoteError ? '' : markPrice"
-        />
       </div>
     </section>
     <div :class="futures ? 'panel futures-actions' : 'spot-actions'">
       <template v-if="futures">
         <div class="ledger-heading">
           <div class="section-title"><Tickets /><h2>合约下单</h2></div>
-          <span class="env" :class="{ live: environment === 'live' }">{{ environment === 'live' ? '实盘' : '测试网' }}</span>
+          <div class="order-heading-actions">
+            <button type="button" class="btn small" aria-haspopup="dialog" @click="openPnl">
+              <DataAnalysis aria-hidden="true" /> 盈亏试算
+            </button>
+            <span class="env live">实盘</span>
+          </div>
         </div>
         <nav class="trade-tabs order-tabs" aria-label="合约交易方式">
           <button type="button" :aria-pressed="!manual" @click="futuresTab = 'copy'">跟单交易</button>
@@ -188,9 +214,10 @@ watch(
         </nav>
       </template>
       <div :role="futures ? 'region' : undefined" :aria-label="futures ? '合约下单表单' : undefined">
-        <CopyTrading v-if="!manual" :entries="entries" :environment="environment" :session="activeSession" :token="token"
+        <CopyTrading v-if="!manual" :entries="entries" :session="activeSession" :token="token"
           :funds="funds" v-model:draft="copyDraft" @connect="emit('connect')" @edit="emit('edit')" @refresh="refreshAccount" />
         <OrderTicket v-if="manualVisited" v-show="manual"
+          ref="orderTicket"
           :active="manual"
           :market="market"
           :environment="environment"
@@ -202,13 +229,28 @@ watch(
           :token="token"
           :funds="funds"
           :positions="account?.positions ?? []"
+          :current-leverage="currentLeverage"
+          :max-leverage="orderMaxLeverage"
+          :leverage-error="leverageError"
+          :leverage-loading="leverageLoading"
           @connect="emit('connect')"
           @refresh="refreshAccount"
+          @refresh-leverage="refreshLeverage"
           @ordered="refreshAccount"
         />
       </div>
     </div>
   </div>
+  <PositionPnlEstimate
+    v-if="futures && pnlDraft"
+    :symbol="symbol"
+    :initial-entry="pnlDraft.entry"
+    :initial-margin="pnlDraft.margin"
+    :initial-leverage="pnlDraft.leverage"
+    :max-leverage="symbolMaxLeverage"
+    :latest-price="freshPrice()"
+    @close="pnlDraft = null"
+  />
   <AccountOverview
     :market="market"
     :symbol="symbol"

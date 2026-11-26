@@ -30,7 +30,7 @@ test('exchange activity matches verified platform IDs, keeps legacy orders out a
     commission: '0.1', commissionAsset: 'BNB', qty: '1', time: spot ? 123321 : 123456 })
   const env = { orderStore: db, BINANCE_FUTURES_USERS: JSON.stringify([user]), fetchBinance: (url, init) => {
     assert.equal(init.method, 'GET')
-    const spot = url.origin === 'https://testnet.binance.vision'
+    const spot = url.origin === 'https://api.binance.com'
     assert.equal(init.headers.get('X-MBX-APIKEY'), spot ? user.spotApiKey : user.apiKey)
     signed.push(url.pathname)
     if (url.pathname.endsWith('/account')) return Response.json({ balances: [{ asset: 'BTC', free: '1', locked: '2' }] })
@@ -54,18 +54,18 @@ test('exchange activity matches verified platform IDs, keeps legacy orders out a
   t.after(async () => { await service.close(); sql.close(); db.close(); unlinkSync(path) })
   const copy = sql.prepare(`INSERT INTO copy_executions
     (environment,user_id,client_id,order_id,portfolio_id,key_identity,symbol,direction,kind,time,quantity,price)
-    VALUES ('testnet','viewer',?,?, '123',?,?,'LONG','open',1,1,100)`)
+    VALUES ('live','viewer',?,?, '123',?,?,'LONG','open',1,1,100)`)
   copy.run('from-copy', tracked, hash(user.apiKey), 'BTCUSDT')
   copy.run('different-key', direct, hash('retired'), 'BTCUSDT')
   copy.run('different-symbol', direct, hash(user.apiKey), 'ETHUSDT')
   const platform = sql.prepare(`INSERT INTO platform_orders
     (environment,user_id,market,client_id,key_identity,symbol,side,type,order_id,time)
-    VALUES ('testnet','viewer',?,?,?,'BTCUSDT','BUY','MARKET',?,1)`)
+    VALUES ('live','viewer',?,?,?,'BTCUSDT','BUY','MARKET',?,1)`)
   for (const [market, key] of [['spot', user.spotApiKey], ['futures', user.apiKey]]) {
     platform.run(market, 'manual-' + market, hash(key), manual)
   }
-  db.reserve('testnet', 'futures', user.id, 'old-local')
-  db.reserve('testnet', 'futures', user.id, 'reused-by-exchange',
+  db.reserve('live', 'futures', user.id, 'old-local')
+  db.reserve('live', 'futures', user.id, 'reused-by-exchange',
     { apiKey: user.apiKey, symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', positionSide: 'BOTH' })
   const get = (market, token = 'mock', symbol = 'BTCUSDT', scope = 'other') => service.fetch(new Request(
     'http://fixture/api/futures/other-trades?' + new URLSearchParams({ market, symbol, scope }),
@@ -86,7 +86,7 @@ test('exchange activity matches verified platform IDs, keeps legacy orders out a
   assert.equal(sql.prepare('SELECT count(*) AS n FROM copy_executions').get().n, 3)
   assert.equal(signed.length, 5)
 
-  db.reserve('testnet', 'futures', user.id, 'in-flight',
+  db.reserve('live', 'futures', user.id, 'in-flight',
     { apiKey: user.apiKey, symbol: 'BTCUSDT', side: 'SELL', type: 'MARKET', positionSide: 'LONG' })
   const secondFill = { ...fill(tracked, false), id: '77' }
   additionalFills = [{ ...fill('81', false), side: 'SELL', positionSide: 'LONG' }, secondFill, secondFill]
@@ -115,7 +115,7 @@ test('exchange activity matches verified platform IDs, keeps legacy orders out a
   copy.run('copy-short-close', '90002', hash(user.apiKey), 'BTCUSDT')
   sql.prepare("UPDATE copy_executions SET kind='close',direction='SHORT' WHERE client_id='copy-short-close'").run()
   const evidence = [tracked, '90002', manual, legacy].map(orderId => ({ ...fill(orderId, false), id: orderId, orderId }))
-  const positions = await classifyFuturesFills(env, user, 'testnet', 'BTCUSDT', evidence)
+  const positions = await classifyFuturesFills(env, user, 'live', 'BTCUSDT', evidence)
   assert.deepEqual(positions.map(row => [row.orderId, row.source, row.portfolioId, row.copyKind, row.copyDirection]), [
     [manual, 'manual', null, null, null], [legacy, 'unverified', null, null, null],
     [tracked, 'copy', '123', 'open', 'LONG'], ['90002', 'copy', '123', 'close', 'SHORT'],

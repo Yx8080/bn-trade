@@ -4,7 +4,7 @@ import { Refresh } from '@element-plus/icons-vue'
 import { amountFromBalance, type OpeningFunds } from '../opening-funds'
 import { formatNumber, formatTradeTime } from '../trades'
 
-const props = defineProps<{ funds: OpeningFunds; shortcuts?: boolean; slider?: boolean; selectedAmount?: number | null }>()
+const props = defineProps<{ funds: OpeningFunds; slider?: boolean; selectedAmount?: number | null }>()
 const emit = defineEmits<{ select: [amount: number]; refresh: []; connect: [] }>()
 const stops = [0, 25, 50, 75, 100]
 const stopList = useId()
@@ -35,12 +35,6 @@ function selectPercent(event: Event) {
       <input type="range" min="0" max="100" step="1" :list="stopList" :value="percent" :disabled="sliderDisabled"
         aria-label="使用可用余额的比例" :aria-valuetext="percent + '%'" @input="selectPercent" />
       <datalist :id="stopList"><option v-for="stop in stops" :key="stop" :value="stop"></option></datalist>
-    </div>
-    <div v-else-if="shortcuts" class="funds-presets" role="group" aria-label="使用可用余额的比例">
-      <button v-for="pct in [10, 25, 50, 100]" :key="pct" type="button"
-        :aria-label="'使用可用余额的 ' + pct + '%'"
-        :disabled="funds.state !== 'ready' || !amountFromBalance(funds.available ?? 0, pct)"
-        @click="emit('select', amountFromBalance(funds.available ?? 0, pct))">{{ pct }}%</button>
     </div>
     <div class="funds-summary">
       <span class="funds-value">可用余额
@@ -109,10 +103,4 @@ function selectPercent(event: Event) {
   border-radius: 5px; color: var(--green); background: transparent;
 }
 .funds-refresh:hover:not(:disabled) { border-color: #bfd5c8; background: white; }
-.funds-presets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
-.funds-presets button {
-  min-height: 28px; border: 1px solid #c9d9ce; border-radius: 5px; background: white;
-  color: #245d46; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums;
-}
-.funds-presets button:hover:not(:disabled), .funds-presets button:focus-visible { border-color: var(--green); background: #e7f3e8; }
 </style>

@@ -12,7 +12,7 @@ const users = ['alice', 'bob'].map(name => ({
 }))
 const config = { BINANCE_FUTURES_USERS: JSON.stringify(users) }
 const order = {
-  environment: 'testnet', symbol: 'BTCUSDT', side: 'BUY', positionSide: 'BOTH',
+  environment: 'live', symbol: 'BTCUSDT', side: 'BUY', positionSide: 'BOTH',
   type: 'LIMIT', quantity: '0.002', price: '60001.50', clientOrderId: 'intent-1',
 }
 
@@ -40,7 +40,7 @@ test('authentication selects one configured account without returning its creden
   assert.equal((await send('session', null)).status, 401)
   assert.equal((await send('session', { token: 'unknown' })).status, 401)
   const session = await send('session?id=alice', users[1])
-  assert.deepEqual(await session.json(), { id: 'bob', name: 'bob', environment: 'testnet' })
+  assert.deepEqual(await session.json(), { id: 'bob', name: 'bob', environment: 'live' })
   const duplicates = { ...config, BINANCE_FUTURES_USERS: JSON.stringify([users[0], { ...users[1], apiKey: users[0].apiKey }]) }
   assert.equal((await send('session', users[1], undefined, duplicates)).status, 503)
   const rotated = { ...config, BINANCE_FUTURES_USERS: JSON.stringify([{ ...users[1], token: 'new-bob-token' }]) }
@@ -62,12 +62,37 @@ test('public quote pairs a futures ticker with its mark and source timestamps', 
   assert.deepEqual(await response.json(), {
     symbol: 'BTCUSDT', lastPrice: '90000.1', lastTime: 123, markPrice: '90001.2', time: 456, environment: 'live',
   })
-  assert.equal((await send('quote?symbol=BTCUSDT&environment=other', null)).status, 400)
+  assert.equal((await send('quote?symbol=BTCUSDT&environment=other', null)).status, 409)
+})
+
+test('guest leverage lookup uses the selected market and rejects default brackets for unknown symbols', async () => {
+  const env = { ...config, fetchBinance: async (url, init) => {
+    const headers = new Headers(init.headers)
+    assert.equal(headers.has('Authorization'), false)
+    assert.equal(headers.has('X-MBX-APIKEY'), false)
+    if (url.pathname === '/fapi/v1/exchangeInfo') {
+      assert.equal(url.host, 'fapi.binance.com')
+      return Response.json({ symbols: [{ symbol: 'NVDAUSDT', status: 'TRADING', quoteAsset: 'USDT' }] })
+    }
+    assert.equal(url.pathname, '/bapi/futures/v1/public/future/common/brackets')
+    assert.equal(init.method, 'POST')
+    const { symbol } = JSON.parse(init.body)
+    assert.equal(url.host, 'www.binance.com')
+    const maxOpenPosLeverage = 50
+    return Response.json({ code: '000000', data: { brackets: [{ symbol, riskBrackets: [
+      { bracketNotionalFloor: 50_000, maxOpenPosLeverage: 5 }, { bracketNotionalFloor: 0, maxOpenPosLeverage },
+    ] }] } })
+  } }
+  const limit = await send('leverage-limit?symbol=NVDAUSDT', null, undefined, env)
+  assert.equal(limit.status, 200)
+  assert.deepEqual(await limit.json(), { symbol: 'NVDAUSDT', environment: 'live', symbolMaxLeverage: 50 })
+  const unknown = await send('leverage-limit?symbol=UNKNOWNUSDT', null, undefined, env)
+  assert.equal(unknown.status, 404)
 })
 
 test('account reports wallet, available balance and exchange-valued open positions only for the authenticated identity', async t => {
   t.mock.method(globalThis, 'fetch', (url, init) => {
-    assert.equal(url.origin, 'https://demo-fapi.binance.com')
+    assert.equal(url.origin, 'https://fapi.binance.com')
     verifySignature(url, init, users[1])
     return Response.json(url.pathname === '/fapi/v3/account' ? {
       assets: [{ asset: 'USDT', walletBalance: '14', availableBalance: '8.9' }],
@@ -82,7 +107,7 @@ test('account reports wallet, available balance and exchange-valued open positio
   const response = await send('account?userId=alice', users[1])
   assert.equal(response.headers.get('Cache-Control'), 'no-store')
   assert.deepEqual(await response.json(), {
-    name: 'bob', environment: 'testnet', balances: [{ asset: 'USDT', walletBalance: '14', availableBalance: '8.9' }],
+    name: 'bob', environment: 'live', balances: [{ asset: 'USDT', walletBalance: '14', availableBalance: '8.9' }],
     positions: [{ symbol: 'BTCUSDT', positionSide: 'SHORT', quantity: '-0.001', entryPrice: '90000',
       markPrice: '90800', unrealizedPnl: '-0.8', marginAsset: 'USDT', updateTime: 123 },
     { symbol: 'BTCUSDC', positionSide: 'LONG', quantity: '1', entryPrice: '90000',
@@ -94,7 +119,8 @@ test('current position mode is a signed read for the selected account and enviro
   const upstream = t.mock.method(globalThis, 'fetch', (url, init) => {
     assert.equal(init.method, 'GET')
     assert.equal(url.pathname, '/fapi/v1/positionSide/dual')
-    if (url.origin === 'https://demo-fapi.binance.com') {
+    assert.equal(url.origin, 'https://fapi.binance.com')
+    if (init.headers.get('X-MBX-APIKEY') === users[0].apiKey) {
       verifySignature(url, init, users[0])
       return Response.json({ dualSidePosition: true })
     }
@@ -107,7 +133,7 @@ test('current position mode is a signed read for the selected account and enviro
   assert.equal(upstream.mock.callCount(), 0)
   const hedge = await send('position-mode', users[0])
   assert.equal(hedge.headers.get('Cache-Control'), 'no-store')
-  assert.deepEqual(await hedge.json(), { environment: 'testnet', mode: 'hedge' })
+  assert.deepEqual(await hedge.json(), { environment: 'live', mode: 'hedge' })
   const oneWay = await send('position-mode', users[1], undefined, { ...config, BINANCE_FUTURES_ENV: 'live' })
   assert.deepEqual(await oneWay.json(), { environment: 'live', mode: 'oneWay' })
   assert.equal(upstream.mock.callCount(), 2)
@@ -126,7 +152,7 @@ test('signed limit orders retain exact decimals and 64-bit IDs, including concur
   t.after(() => db.close())
   const env = { ...config, orderStore: db }
   const upstream = t.mock.method(globalThis, 'fetch', (url, init) => {
-    assert.equal(url.origin, 'https://demo-fapi.binance.com')
+    assert.equal(url.origin, 'https://fapi.binance.com')
     const params = verifySignature(url, init, users[0])
     assert.equal(init.method, 'POST')
     if (url.pathname === '/fapi/v1/leverage') {
@@ -171,7 +197,7 @@ test('looks up the leverage bracket for the account’s absolute hedge exposure 
   })
   assert.equal((await send('leverage?symbol=ETHUSDT', null)).status, 401)
   assert.deepEqual(await (await send('leverage?symbol=ETHUSDT', users[1])).json(),
-    { symbol: 'ETHUSDT', environment: 'testnet', leverage: 7, symbolMaxLeverage: 150, maxLeverage: 50,
+    { symbol: 'ETHUSDT', environment: 'live', leverage: 7, symbolMaxLeverage: 150, maxLeverage: 50,
       exposure: '1200', brackets: [{ cap: '1000', leverage: 150 }, { cap: '50000', leverage: 50 }] })
   gross = 0
   assert.equal((await (await send('leverage?symbol=ETHUSDT', users[1])).json()).maxLeverage, 150)
@@ -237,7 +263,7 @@ test('independent service connections honor the symbol lease and only its curren
   const first = createLocalOrderDb(file)
   const second = createLocalOrderDb(file)
   t.after(() => { first.close(); second.close(); unlinkSync(file) })
-  const identity = ['testnet', users[0].id, order.symbol]
+  const identity = ['live', users[0].id, order.symbol]
   const now = Date.now()
   assert.equal(first.claimFuturesSymbol(...identity, 'owner-1', now + 60_000, now), true)
   const env = { ...config, orderStore: second, fetchBinance: () => assert.fail('unexpected upstream request') }
@@ -299,14 +325,14 @@ test('invalid or unconfigured orders do not reach Binance', async t => {
     { leverage: 5, side: 'SELL', positionSide: 'LONG' }, { leverage: 5, side: 'BUY', positionSide: 'SHORT' }]) {
     assert.equal((await send('orders', users[0], { ...order, ...edits })).status, 400)
   }
-  assert.equal((await send('orders', users[0], { ...order, environment: 'live' })).status, 409)
+  assert.equal((await send('orders', users[0], { ...order, environment: 'testnet' })).status, 409)
   assert.equal(upstream.mock.callCount(), 0)
 })
 
 function closeFixture(t) {
   const db = createLocalOrderDb(':memory:')
   t.after(() => db.close())
-  const input = { environment: 'testnet', symbol: 'BTCUSDC', positionSide: 'BOTH', direction: 'LONG',
+  const input = { environment: 'live', symbol: 'BTCUSDC', positionSide: 'BOTH', direction: 'LONG',
     expectedQuantity: '0.01200000', expectedUpdateTime: 731, quantity: '0.006', clientOrderId: 'position-close' }
   const market = { symbol: input.symbol, quoteAsset: 'USDC', baseAsset: 'BTC', status: 'TRADING', orderTypes: ['MARKET'],
     filters: [{ filterType: 'LOT_SIZE', minQty: '0.001', maxQty: '100', stepSize: '0.001' },
@@ -314,7 +340,7 @@ function closeFixture(t) {
   const row = { symbol: input.symbol, positionSide: 'BOTH', positionAmt: '0.012', updateTime: input.expectedUpdateTime }
   const fixture = { risk: [row], orders: [], row, input, db }
   fixture.env = { ...config, orderStore: db, fetchBinance: async (url, init) => {
-    assert.equal(url.origin, 'https://demo-fapi.binance.com')
+    assert.equal(url.origin, 'https://fapi.binance.com')
     if (url.pathname === '/fapi/v1/exchangeInfo') return Response.json({ symbols: [market] })
     const params = verifySignature(url, init, users[0])
     assert.equal(params.get('symbol'), input.symbol)
@@ -337,7 +363,7 @@ test('row closes use exact market lots and can target either leg or the one-way 
   const fixture = closeFixture(t)
   const { env, row, input } = fixture
   const rules = await send('close-position?symbol=BTCUSDC', users[0], undefined, env)
-  assert.deepEqual(await rules.json(), { symbol: 'BTCUSDC', environment: 'testnet', baseAsset: 'BTC', stepSize: '0.003', minQty: '0.003', maxQty: '2' })
+  assert.deepEqual(await rules.json(), { symbol: 'BTCUSDC', environment: 'live', baseAsset: 'BTC', stepSize: '0.003', minQty: '0.003', maxQty: '2' })
   for (const [leg, direction, quantity, side] of [
     ['BOTH', 'LONG', '0.006', 'SELL'], ['BOTH', 'SHORT', '0.012', 'BUY'],
     ['LONG', 'LONG', '0.012', 'SELL'], ['SHORT', 'SHORT', '0.003', 'BUY'],
@@ -378,7 +404,7 @@ test('row closes reject changed position snapshots, quantities off the market lo
   await check({ quantity: '0.012000000000000001' }, [row], 'INVALID_CLOSE')
   await check({ leverage: 10 }, [row], 'INVALID_CLOSE')
   await check({ positionSide: 'SHORT' }, [row], 'INVALID_CLOSE')
-  await check({ environment: 'live' }, [row], 'ENVIRONMENT_CHANGED')
+  await check({ environment: 'testnet' }, [row], 'ENVIRONMENT_CHANGED')
   await check({}, [row, row], 'CLOSE_CHECK_UNAVAILABLE')
   await check({}, {}, 'CLOSE_CHECK_UNAVAILABLE')
   assert.equal((await send('close-position', null, input, env)).status, 401)
@@ -406,7 +432,7 @@ test('row close rechecks inside the symbol lease and an uncertain receipt is que
   assert.equal(fixture.orders.length, 1)
   const lookup = await send('orders?symbol=BTCUSDC&clientOrderId=' + input.clientOrderId, users[0], undefined, env)
   assert.equal((await lookup.json()).status, 'FILLED')
-  assert.equal(env.orderStore.platform.latest({ environment: 'testnet', userId: users[0].id,
+  assert.equal(env.orderStore.platform.latest({ environment: 'live', userId: users[0].id,
     market: 'futures', clientOrderId: input.clientOrderId }).status, 'FILLED')
 })
 

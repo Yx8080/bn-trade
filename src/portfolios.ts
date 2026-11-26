@@ -1,12 +1,9 @@
+import { defaultLeadPortfolios } from '../shared/lead-portfolios.js'
+
 export interface LeadPortfolio {
   id: string
   name: string
 }
-
-const initialPortfolios: LeadPortfolio[] = [
-  { id: '5075281354358777856', name: '熬鹰资本' },
-  { id: '4751838302089254401', name: 'Btc星辰' },
-]
 
 function storageKey(userId: string) {
   return `bn-trade:watchlist:v1:${encodeURIComponent(userId)}`
@@ -42,7 +39,7 @@ export function loadWatchlist(userId: string, previousLiveId?: string): LeadPort
   } catch {
     // Browsers can deny storage access, including when a saved preference is read.
   }
-  return initialPortfolios.map(portfolio => ({ ...portfolio }))
+  return defaultLeadPortfolios.map(portfolio => ({ ...portfolio }))
 }
 
 export function saveWatchlist(userId: string, entries: LeadPortfolio[]): boolean {

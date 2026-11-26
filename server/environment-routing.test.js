@@ -24,65 +24,52 @@ async function serve(t, env, exchange) {
   })
 }
 
-test('the selected environment routes quotes and binds, rejects ambiguous requests, and confines legacy tokens to their original environment', async t => {
+test('requests for a retired environment never reach Binance; all unlabeled requests use live', async t => {
   const requests = []
-  const call = await serve(t, { BINANCE_FUTURES_ENV: 'live', BINANCE_FUTURES_USERS: JSON.stringify([
-    { id: 'legacy', name: '原工作区', token: 'old-session', apiKey: 'original', apiSecret: 'secret' }]) }, (url, init) => {
+  const call = await serve(t, { BINANCE_FUTURES_ENV: 'testnet', BINANCE_FUTURES_USERS: JSON.stringify([
+    { id: 'legacy', name: 'Legacy', token: 'old-session', apiKey: 'old-key', apiSecret: 'secret' }]) }, (url, init) => {
     requests.push(url.hostname)
     if (url.pathname === '/api/v3/ticker/price') return Response.json({ symbol: 'BTCUSDT', price: '100' })
-    assert.equal(init.headers.get('X-MBX-APIKEY'), 'original')
-    if (url.hostname === 'demo-fapi.binance.com') return Response.json({ code: -2015 }, { status: 401 })
+    assert.equal(init.headers.get('X-MBX-APIKEY'), 'fixture')
     return Response.json(url.pathname === '/fapi/v3/account' ? { assets: [] } : { balances: [], uid: 1314 })
   })
   const policy = { credentialStorage: 'memory', identity: 'binance-uid' }
   assert.deepEqual(await (await call('accounts/bind')).json(), { environment: 'live', ...policy })
-  assert.deepEqual(await (await call('accounts/bind', 'testnet')).json(), { environment: 'testnet', ...policy })
+  assert.equal((await call('accounts/bind', 'testnet')).status, 400)
   assert.equal((await call('accounts/bind', 'invalid')).status, 400)
-  assert.equal((await call('spot/quote?environment=live&symbol=BTCUSDT', 'testnet')).status, 409)
-  const bind = { apiKey: 'original', apiSecret: 'secret', environment: 'live', identity: 'binance-uid' }
-  assert.equal((await call('accounts/bind', 'testnet', null, bind)).status, 409)
-  assert.equal((await call('futures/session', 'testnet', 'old-session')).status, 401)
+  assert.equal((await call('spot/quote?symbol=BTCUSDT&environment=live&environment=testnet')).status, 409)
+  const bind = { apiKey: 'fixture', apiSecret: 'secret', environment: 'live', identity: 'binance-uid' }
+  assert.equal((await call('accounts/bind', 'live', null, { ...bind, environment: 'testnet' })).status, 409)
+  assert.equal((await call('futures/session', undefined, 'old-session')).status, 401)
   assert.deepEqual(requests, [])
-  const configured = await (await call('futures/session', undefined, 'old-session')).json()
-  assert.equal(configured.uid, '1314')
-  assert.deepEqual(requests.splice(0).sort(), ['api.binance.com', 'fapi.binance.com'])
-  const quote = await (await call('spot/quote?symbol=BTCUSDT', 'testnet')).json()
-  assert.equal(quote.environment, 'testnet')
-  assert.equal(requests.pop(), 'testnet.binance.vision')
-  const other = await (await call('accounts/bind', 'testnet', null, { ...bind, environment: 'testnet' })).json()
-  const original = await (await call('accounts/bind', 'live', null, bind)).json()
-  assert.equal(original.id, configured.id)
-  assert.equal(original.uid, other.uid)
-  assert.notEqual(other.id, original.id)
-  assert.deepEqual(requests.sort(), ['api.binance.com', 'demo-fapi.binance.com', 'fapi.binance.com', 'testnet.binance.vision'].sort())
-  assert.equal((await call('futures/session', 'live', other.token)).status, 401)
-  assert.equal((await call('futures/session', 'testnet', original.token)).status, 401)
-  await call('accounts/session', 'testnet', original.token, null, 'DELETE')
-  assert.equal((await call('futures/session', 'live', original.token)).status, 200)
-  await call('accounts/session', 'live', original.token, null, 'DELETE')
-  assert.equal((await call('futures/session', 'live', original.token)).status, 401)
-  assert.equal((await call('futures/session', 'testnet', other.token)).status, 200)
+  const quote = await (await call('spot/quote?symbol=BTCUSDT')).json()
+  assert.equal(quote.environment, 'live')
+  assert.equal(requests.pop(), 'api.binance.com')
+  const response = await call('accounts/bind', 'live', null, bind)
+  assert.equal(response.status, 200)
+  const session = await response.json()
+  assert.equal(session.issuer, 'live')
+  assert.equal(session.id, 'uid:1314')
+  assert.deepEqual(requests.sort(), ['api.binance.com', 'fapi.binance.com'])
+  assert.equal((await call('accounts/session', 'testnet', session.token, null, 'DELETE')).status, 400)
+  assert.equal((await call('futures/session', 'live', session.token)).status, 200)
+  assert.equal((await call('accounts/session', 'live', session.token, null, 'DELETE')).status, 204)
+  assert.equal((await call('futures/session', 'live', session.token)).status, 401)
 })
 
-test('copy monitoring and platform settlement continue independently in both environments after logout', async t => {
+test('live copy execution and platform settlement continue after logout', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] })
   const leaders = []
-  const amounts = { testnet: '10', live: '20' }
-  const hosts = { 'api.binance.com': 'live', 'fapi.binance.com': 'live', 'testnet.binance.vision': 'testnet',
-    'demo-api.binance.com': 'testnet', 'demo-fapi.binance.com': 'testnet' }
+  const amount = '20'
+  const environment = 'live'
   const call = await serve(t, {}, (url, init) => {
     if (url.hostname === 'www.binance.com') {
-      leaders.push(JSON.parse(init.body).portfolioId)
+      const { portfolioId } = JSON.parse(init.body)
+      if (portfolioId === amount) leaders.push(portfolioId)
       return Response.json({ code: '000000', data: { list: [], total: 0 } })
     }
-    const environment = hosts[url.hostname]
-    assert.ok(environment)
-    const key = init.headers.get('X-MBX-APIKEY')
-    if (environment === 'testnet') {
-      const expectedKey = url.hostname === 'testnet.binance.vision' ? 'testnet-spot' : 'testnet-futures'
-      if (key !== expectedKey) return Response.json({ code: -2015 }, { status: 401 })
-    } else assert.equal(key, 'live-fixture')
-    const amount = amounts[environment]
+    assert.ok(['api.binance.com', 'fapi.binance.com'].includes(url.hostname))
+    assert.equal(init.headers.get('X-MBX-APIKEY'), 'live-fixture')
     switch (url.pathname) {
       case '/api/v3/account': return Response.json({ balances: [], uid: 201 })
       case '/fapi/v3/account': return Response.json({ assets: [] })
@@ -99,30 +86,27 @@ test('copy monitoring and platform settlement continue independently in both env
       default: throw Error('Unexpected mock exchange route')
     }
   })
-  const login = async (environment, market) => {
-    const apiKey = environment === 'testnet' ? environment + '-' + market : 'live-fixture'
+  const login = async () => {
+    const apiKey = 'live-fixture'
     const res = await call('accounts/bind', environment, null, { environment, apiKey, apiSecret: 'fixture-secret' })
     assert.equal(res.status, 200)
     return (await res.json()).token
   }
-  for (const [environment, amount] of Object.entries(amounts)) {
-    const token = await login(environment, 'futures')
-    const spotToken = environment === 'testnet' ? await login(environment, 'spot') : token
+  {
+    const token = await login()
     const config = { portfolioIds: [amount], leverage: 1, sizingMode: 'margin', amount: 10, repeat: 'first', maxEntries: 1, maxPositions: 1, stopLoss: 5 }
     assert.equal((await call('futures/copy', environment, token, { action: 'start', environment, config })).status, 200)
     const order = { symbol: 'BTCUSDT', quoteOrderQty: amount, clientOrderId: 'same-client', environment }
-    assert.equal((await call('spot/orders', environment, spotToken, { ...order, environment: environment === 'live' ? 'testnet' : 'live' })).status, 409)
-    assert.equal((await call('spot/orders', environment, spotToken, order)).status, 201)
+    assert.equal((await call('spot/orders', environment, token, { ...order, environment: 'testnet' })).status, 409)
+    assert.equal((await call('spot/orders', environment, token, order)).status, 201)
     assert.equal((await call('accounts/session', environment, token, null, 'DELETE')).status, 204)
-    if (spotToken !== token) assert.equal((await call('accounts/session', environment, spotToken, null, 'DELETE')).status, 204)
   }
   t.mock.timers.tick(5000)
-  for (const [environment, amount] of Object.entries(amounts)) {
-    const token = await login(environment, 'futures')
-    const spotToken = environment === 'testnet' ? await login(environment, 'spot') : token
+  {
+    const token = await login()
     let report, strategy
     for (let attempt = 0; attempt < 25; attempt++) {
-      report = await (await call('platform/pnl', environment, spotToken)).json()
+      report = await (await call('platform/pnl', environment, token)).json()
       strategy = await (await call('futures/copy', environment, token)).json()
       if (report.pendingCount === 0 && strategy.lastCheck) break
       await setImmediate()
@@ -133,7 +117,7 @@ test('copy monitoring and platform settlement continue independently in both env
     assert.equal(report.pendingCount, 0)
     assert.deepEqual(report.rows.map(row => row.quote), [Number(amount)])
   }
-  assert.deepEqual(leaders.sort(), Object.values(amounts).sort())
+  assert.deepEqual(leaders, [amount])
 })
 
 test('a configured token with different signed UIDs can select a market but cannot combine the two account histories', async t => {

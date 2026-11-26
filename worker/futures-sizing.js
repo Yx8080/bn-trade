@@ -45,7 +45,7 @@ function commonStep(first, second) {
   return first / a * second
 }
 
-async function getContract(env, base, symbol) {
+export async function getContract(env, base, symbol) {
   let cached = marketInfo.get(env)
   if (!cached || cached.base !== base || Date.now() >= cached.expiresAt) {
     const info = binanceRequest(env, base, '/fapi/v1/exchangeInfo').then(data => {

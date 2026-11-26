@@ -10,14 +10,12 @@ export interface MarketQuote {
   markTime: number
 }
 
-export function marketStreamUrl(market: Market, environment: Environment, symbol: string) {
+export function marketStreamUrl(market: Market, symbol: string) {
   const pair = encodeURIComponent(symbol.toLowerCase())
   if (market === 'spot') {
-    const host = environment === 'live' ? 'stream.binance.com:443' : 'stream.testnet.binance.vision'
-    return `wss://${host}/ws/${pair}@miniTicker`
+    return `wss://stream.binance.com:443/ws/${pair}@miniTicker`
   }
-  const host = environment === 'live' ? 'fstream.binance.com' : 'fstream.binancefuture.com'
-  return `wss://${host}/market/stream?streams=${pair}@miniTicker/${pair}@markPrice@1s`
+  return `wss://fstream.binance.com/market/stream?streams=${pair}@miniTicker/${pair}@markPrice@1s`
 }
 
 export function subscribeMarketQuote(
@@ -94,7 +92,7 @@ export function subscribeMarketQuote(
     reconnectTimer = undefined
     if (stopped || socket) return
     try {
-      socket = new WebSocket(marketStreamUrl(market, environment, symbol))
+      socket = new WebSocket(marketStreamUrl(market, symbol))
     } catch {
       scheduleReconnect()
       return

@@ -1,4 +1,5 @@
 import type { Trade } from './trades'
+import { isAppLeverage } from '../shared/leverage.js'
 
 type PositionSide = 'LONG' | 'SHORT'
 
@@ -9,6 +10,15 @@ export function linearPnl(side: PositionSide, entryPrice: number, markPrice: num
   const change = side === 'LONG' ? markPrice - entryPrice : entryPrice - markPrice
   const pnl = change * quantity
   return Number.isFinite(pnl) ? pnl : null
+}
+
+export function linearPnlFromMargin(side: PositionSide, entryPrice: number, exitPrice: number, margin: number, leverage: number) {
+  if (!Number.isFinite(margin) || margin <= 0 || !isAppLeverage(leverage)) return null
+  const quantity = margin * leverage / entryPrice
+  const pnl = linearPnl(side, entryPrice, exitPrice, quantity)
+  if (pnl === null) return null
+  const roi = pnl / margin
+  return Number.isFinite(roi * 100) ? { pnl, roi } : null
 }
 
 export function reportedPnl(trade: Trade): number | null {

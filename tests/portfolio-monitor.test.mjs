@@ -25,7 +25,6 @@ function fixture(t, onRequest) {
     const url = new URL(target, 'http://localhost')
     const body = init.body && JSON.parse(init.body)
     calls.push({ path: url.pathname, params: url.searchParams, body })
-    if (url.pathname === '/api/monitor/release') return new Response(null, { status: 204 })
     return onRequest(url.pathname, url.searchParams, body)
   })
   const history = usePortfolioHistory([{ id: '123', name: '组合' }])
@@ -56,7 +55,7 @@ test('默认窗口跨日滚动 24 小时，翻页沿用原查询范围，手动�
   let receivedAt = null
   t.mock.method(Date, 'now', () => now)
   const { history, calls, tick } = fixture(t, (path, params) => {
-    if (path === '/api/monitor/observe') return status(receivedAt)
+    if (path === '/api/monitor/status') return status(receivedAt)
     if (params.has('cursor')) return Response.json({ list: [], total: 3 })
     const records = [
       { ...row('recent'), orderUpdateTime: initial },
@@ -96,11 +95,11 @@ test('默认窗口跨日滚动 24 小时，翻页沿用原查询范围，手动�
   assert.equal(history.pinned.value, false)
 })
 
-test('可见期间建租约；历史查询、游标翻页和过期请求都不改变采集范围', async t => {
+test('页面只读取状态和成交，换查询范围后丢弃旧的请求结果', async t => {
   const late = Promise.withResolvers()
   const historicalStart = Date.parse('2020-01-01T00:00:00+08:00')
   const { history, calls, tick } = fixture(t, (path, params) => {
-    if (path === '/api/monitor/observe') return status(Date.now(), 123456789)
+    if (path === '/api/monitor/status') return status(Date.now(), 123456789)
     assert.equal(path, '/api/monitor/trades')
     if (Number(params.get('startTime')) !== historicalStart) return late.promise
     return params.get('cursor') ? Response.json({ list: [row('older')], total: 2 })
@@ -109,45 +108,46 @@ test('可见期间建租约；历史查询、游标翻页和过期请求都不�
   assert.equal(calls.length, 0)
   history.start()
   await settle()
-  const firstVisit = calls.find(c => c.path.endsWith('/observe')).body
+  const statusRead = calls.find(c => c.path.endsWith('/status'))
   assert.deepEqual(history.updatedAtById.value, { '123': 123456789 })
-  assert.deepEqual(Object.keys(firstVisit).sort(), ['portfolioIds', 'viewId'])
+  assert.deepEqual([...statusRead.params], [['portfolioId', '123']])
+  assert.equal(statusRead.body, undefined)
   history.startDate.value = history.endDate.value = '2020-01-01'
   history.search()
   await settle()
   history.loadMore()
   await settle()
   assert.equal(calls.at(-1).params.get('cursor'), 'sqlite-snapshot')
-  assert.equal(calls.filter(c => c.path.endsWith('/observe')).length, 1)
+  assert.equal(calls.filter(c => c.path.endsWith('/status')).length, 1)
   late.resolve(Response.json({ list: [row('discarded')], total: 1 }))
   await settle()
   assert.deepEqual(history.portfolios.value[0].records.map(r => r.observedId), ['newer', 'older'])
   const localReads = calls.filter(c => c.path.endsWith('/trades')).length
   await tick()
   assert.equal(calls.filter(c => c.path.endsWith('/trades')).length, localReads)
+  const beforeStop = calls.length
   history.stop()
   assert.deepEqual(history.updatedAtById.value, {})
-  assert.deepEqual(calls.at(-1).body, { viewId: firstVisit.viewId })
+  assert.equal(calls.length, beforeStop)
   history.start()
-  assert.notEqual(calls.at(-1).body.viewId, firstVisit.viewId)
+  assert.equal(calls.at(-1).path, '/api/monitor/status')
 })
 
-test('心跳失败后释放旧租约，下次恢复从新访问开始', async t => {
+test('状态读取失败后重试，期间仍显示 SQLite 历史', async t => {
   let available = false
   const { history, calls, tick } = fixture(t, path => {
-    if (path === '/api/monitor/trades') return Response.json({ list: [], total: 0 })
-    assert.equal(path, '/api/monitor/observe')
+    if (path === '/api/monitor/trades') return Response.json({ list: [row('cached')], total: 1 })
+    assert.equal(path, '/api/monitor/status')
     if (!available) throw Error('断线')
     return status(null)
   })
   history.start()
   await settle()
-  const first = calls.find(c => c.path.endsWith('/observe')).body.viewId
-  assert.equal(calls.at(-1).path, '/api/monitor/release')
-  assert.deepEqual(calls.at(-1).body, { viewId: first })
-  assert.equal(history.portfolios.value[0].observation.error, '断线')
+  assert.equal(calls.at(-1).path, '/api/monitor/status')
+  assert.equal(history.statusError.value, '断线')
+  assert.deepEqual(history.portfolios.value[0].records.map(record => record.observedId), ['cached'])
   available = true
   await tick()
-  assert.notEqual(calls.at(-1).body.viewId, first)
-  assert.equal(history.portfolios.value[0].observation.error, '')
+  assert.equal(calls.at(-1).path, '/api/monitor/status')
+  assert.equal(history.statusError.value, '')
 })

@@ -1,5 +1,5 @@
-import { futuresBases } from '../worker/futures.js'
-import { spotBases } from '../worker/spot.js'
+import { futuresBase } from '../worker/futures.js'
+import { spotBase } from '../worker/spot.js'
 import { ApiError, apiErrorResponse, binanceRequest, getTradingEnvironment, jsonResponse, legacyBinding,
   readOrderJson, sessionToken } from '../worker/trading.js'
 
@@ -40,11 +40,11 @@ async function verifyMarket(env, base, probe, credentials) {
 
 // /api/v3/account identifies the signing key's owner. The USD-M account
 // endpoint establishes futures access but does not document an account UID.
-export async function verifyAccountIdentity(env, environment, credentials, allowedMarkets = marketNames) {
+export async function verifyAccountIdentity(env, credentials, allowedMarkets = marketNames) {
   if (!allowedMarkets.length) throw rejected()
   const [futures, spot] = await Promise.all([
-    allowedMarkets.includes('futures') && verifyMarket(env, futuresBases[environment], futuresProbe, credentials),
-    (environment === 'live' || allowedMarkets.includes('spot')) && verifyMarket(env, spotBases[environment], spotProbe, credentials),
+    allowedMarkets.includes('futures') && verifyMarket(env, futuresBase, futuresProbe, credentials),
+    verifyMarket(env, spotBase, spotProbe, credentials),
   ])
   const verdicts = { futures, spot }
   const markets = allowedMarkets.filter(market => verdicts[market].status === 'verified')
@@ -54,21 +54,13 @@ export async function verifyAccountIdentity(env, environment, credentials, allow
     throw rejected()
   }
 
-  let identity = spot
-  let issuer = environment === 'live' ? 'live' : 'spot-testnet'
-  if (environment === 'testnet' && markets.includes('futures')) {
-    // Spot Test Network and Binance Demo Trading issue credentials independently.
-    if (markets.includes('spot')) throw uidMismatch()
-    issuer = 'demo'
-    identity = await verifyMarket(env, 'https://demo-api.binance.com', spotProbe, credentials)
-  }
-  if (identity.status === 'limited') throw limited()
-  if (identity.status === 'unavailable') throw unavailable()
+  if (spot.status === 'limited') throw limited()
+  if (spot.status === 'unavailable') throw unavailable()
   // binanceRequest retains the exact source text of numeric UIDs.
-  if (identity.status !== 'verified' || typeof identity.uid !== 'string' || !/^[1-9]\d{0,19}$/.test(identity.uid)) throw missingUid()
-  if (futures?.uid !== undefined && futures.uid !== identity.uid) throw uidMismatch()
+  if (spot.status !== 'verified' || typeof spot.uid !== 'string' || !/^[1-9]\d{0,19}$/.test(spot.uid)) throw missingUid()
+  if (futures?.uid !== undefined && futures.uid !== spot.uid) throw uidMismatch()
   const unavailableMarkets = allowedMarkets.filter(market => ['limited', 'unavailable'].includes(verdicts[market].status))
-  return { issuer, uid: identity.uid, markets, unavailableMarkets }
+  return { issuer: 'live', uid: spot.uid, markets, unavailableMarkets }
 }
 
 export async function accountBinding(request, env) {
@@ -97,7 +89,7 @@ export async function accountBinding(request, env) {
     const accounts = env.orderStore.accounts
     const allowed = accounts.bindingMarkets(environment, apiKey)
     const allowedMarkets = marketNames.filter(market => (!legacy || legacy.markets.includes(market)) && (!allowed || allowed.includes(market)))
-    const identity = await verifyAccountIdentity(env, environment, { apiKey, apiSecret }, allowedMarkets)
+    const identity = await verifyAccountIdentity(env, { apiKey, apiSecret }, allowedMarkets)
     const result = accounts.bind(environment, { apiKey, apiSecret, ...identity }, legacy)
     return jsonResponse(result)
   } catch (error) {

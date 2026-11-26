@@ -61,7 +61,7 @@ test('account read shares one history per symbol and manual adoption verifies sc
   let calls = []
   const env = { BINANCE_FUTURES_USERS: JSON.stringify([user]), orderStore: {
     platform: { orderIds(environment, owner, key, market, symbol, ids) {
-      assert.equal(environment, 'testnet')
+      assert.equal(environment, 'live')
       assert.equal(owner, user.id)
       assert.equal(market, 'futures')
       assert.equal(symbol, 'BTCUSDT')
@@ -85,9 +85,9 @@ test('account read shares one history per symbol and manual adoption verifies sc
   assert.deepEqual(calls, ['/fapi/v3/positionRisk', '/fapi/v1/userTrades'])
   calls = []
   const actual = { symbol: 'BTCUSDT', direction: 'LONG', quantity: 2, entryPrice: 100, updateTime: 20 }
-  assert.equal(await isPlatformManualPosition(env, user, 'testnet', actual), true)
+  assert.equal(await isPlatformManualPosition(env, user, 'live', actual), true)
   assert.deepEqual(calls, ['/fapi/v1/userTrades'])
-  assert.equal(await isPlatformManualPosition(env, user, 'testnet', { ...actual, updateTime: 21 }), false)
+  assert.equal(await isPlatformManualPosition(env, user, 'live', { ...actual, updateTime: 21 }), false)
 })
 
 test('older manual base requires exchange history covering both the ledger anchor and the current snapshot', async () => {
@@ -102,7 +102,7 @@ test('older manual base requires exchange history covering both the ledger ancho
   const env = { orderStore: { platform: {
     orderIds: (_env, _id, _key, _market, _symbol, ids) => new Set(ids.filter(id => id === '201')),
     futuresFills(environment, id, keys) {
-      assert.deepEqual([environment, id, keys], ['testnet', 'uid:21', { futures: 'uid:21', spot: null }])
+      assert.deepEqual([environment, id, keys], ['live', 'uid:21', { futures: 'uid:21', spot: null }])
       return [{ symbol: 'BTCUSDT', positionSide: 'BOTH', side: 'BUY', quantity: 0.1, price: 100, tradeId: '201' }]
     },
   }, copy: { orderPortfolios: () => portfolios } }, fetchBinance(url) {
@@ -112,8 +112,8 @@ test('older manual base requires exchange history covering both the ledger ancho
     return Response.json(fromId ? older : history.slice(1))
   } }
   const live = { symbol: 'BTCUSDT', direction: 'LONG', quantity: 0.1, entryPrice: 102.30769231, updateTime: 20 }
-  assert.equal(await isPlatformManualPosition(env, user, 'testnet', live), true)
+  assert.equal(await isPlatformManualPosition(env, user, 'live', live), true)
   assert.deepEqual(cursors, [null, '201'])
   older = history.slice(0, -1)
-  assert.equal(await isPlatformManualPosition(env, user, 'testnet', live), false)
+  assert.equal(await isPlatformManualPosition(env, user, 'live', live), false)
 })

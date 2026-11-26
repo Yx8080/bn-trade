@@ -1,14 +1,9 @@
 import { isUsdtSymbol } from '../worker/trading.js'
 
-const urls = {
-  live: 'wss://fstream.binance.com/market/stream',
-  testnet: 'wss://fstream.binancefuture.com/market/stream',
-}
+const url = 'wss://fstream.binance.com/market/stream'
 
 // Mark updates only wake the account risk check. The account snapshot and engine decide whether to close.
-export function createMarkWatch(environment, connectSocket, onThreshold) {
-  const url = urls[environment]
-  if (!url) throw new Error('跟单行情环境无效。')
+export function createMarkWatch(connectSocket, onThreshold) {
   let positions = new Map()
   const subscribed = new Set()
   const lastEvent = new Map()

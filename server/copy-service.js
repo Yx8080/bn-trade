@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { isCopyLeverageOverrides } from '../shared/leverage.js'
 import { ApiError, apiErrorResponse, getTradingEnvironment, getTradingUser, getTradingUserById, isValidLeverage, jsonResponse, readOrderJson } from '../worker/trading.js'
 import { createCopyExchange } from './copy-exchange.js'
 import { runCopyTick } from './copy-engine.js'
@@ -47,8 +48,8 @@ function parseConfig(input) {
     || portfolioIds.some(id => typeof id !== 'string' || !/^\d{1,30}$/.test(id))) {
     throw new ApiError(400, 'INVALID_COPY_CONFIG', '请选择至少一个有效的带单组合，每个组合只能选择一次。')
   }
-  if (input.leverage != null && !isValidLeverage(input.leverage))
-    throw new ApiError(400, 'INVALID_COPY_CONFIG', '跟单杠杆须为正整数。')
+  if (input.leverage != null && input.leverage !== 'max' && !isValidLeverage(input.leverage) && !isCopyLeverageOverrides(input.leverage))
+    throw new ApiError(400, 'INVALID_COPY_CONFIG', '杠杆须为正整数，自定义倍数须在对应档位范围内。')
   // Clients and strategies created before margin sizing used a fixed notional.
   const sizingMode = input.sizingMode === undefined ? 'notional' : input.sizingMode
   if (!['notional', 'margin', 'equityPercent'].includes(sizingMode))
@@ -166,7 +167,7 @@ export function createCopyService(env, exchangeFor = createCopyExchange) {
       const owners = env.verifyConfiguredUser || !env.BINANCE_FUTURES_USERS
         ? env.orderStore.accounts.connectedOwners(environment, 'futures') : undefined
       if (env.openMarkStream) {
-        markWatch ??= createMarkWatch(environment, env.openMarkStream, id => {
+        markWatch ??= createMarkWatch(env.openMarkStream, id => {
           if (stopped || running.has(id)) return
           try {
             if (store().wakeRisk(environment, id, Date.now())) launch(environment, id)
@@ -223,8 +224,8 @@ export function createCopyService(env, exchangeFor = createCopyExchange) {
           const config = parseConfig(input)
           const same = JSON.stringify(config) === JSON.stringify(state.config) && keyIdentity(user) === state.keyIdentity
           // Original single-leader clients used their exchange leverage. Keep
-          // those requests and exact resumes compatible, but require an explicit
-          // multiplier when starting or editing a strategy via the new form.
+          // those requests and exact resumes compatible, but require a leverage
+          // choice when starting or editing a strategy via the new form.
           if (input.portfolioIds !== undefined && config.leverage === null && !same)
             throw new ApiError(400, 'INVALID_COPY_CONFIG', '请填写跟单杠杆倍数。')
           if (same && state.enabled) return jsonResponse(publicState(state))

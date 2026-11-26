@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Finished, Refresh } from '@element-plus/icons-vue'
+import { Refresh } from '@element-plus/icons-vue'
 import type { LeadPortfolio } from '../portfolios'
 import { fetchClosedPositions, formatNumber, formatTradeAmount, formatTradeTime, type ClosedPosition } from '../trades'
 
@@ -49,16 +49,7 @@ watch([selected, page, refresh], async ([id, number], _, onCleanup) => {
 </script>
 
 <template>
-  <section class="panel" aria-label="已平仓位" :aria-busy="loading">
-    <div class="ledger-heading">
-      <div class="section-title">
-        <div class="title-icon"><Finished /></div>
-        <h2>已平仓位</h2>
-      </div>
-      <button class="btn small" :disabled="loading || !selected" @click="refresh++">
-        <Refresh />{{ loading ? '读取中' : error ? '重试' : '刷新' }}
-      </button>
-    </div>
+  <div :aria-busy="loading">
     <div class="position-controls">
       <label v-if="entries.length" class="field">
         <span>带单组合</span>
@@ -66,7 +57,10 @@ watch([selected, page, refresh], async ([id, number], _, onCleanup) => {
           <option v-for="entry in entries" :key="entry.id" :value="entry.id">{{ entry.name || entry.id }}</option>
         </select>
       </label>
-      <p>列表读取本地记录。监控到对应的平仓成交时，才从币安披露中补入缺少的仓位或字段。</p>
+      <p>按本地监控成交归集，开平数量相等时生成一条记录。盈亏为平仓成交披露值合计，手续费未单独披露。</p>
+      <button class="btn small" :disabled="loading || !selected" @click="refresh++">
+        <Refresh />{{ loading ? '读取中' : error ? '重试' : '刷新' }}
+      </button>
     </div>
     <p v-if="error" class="notice error" role="alert">
       {{ error }}
@@ -75,7 +69,7 @@ watch([selected, page, refresh], async ([id, number], _, onCleanup) => {
     <div v-if="!error || currentResult" class="table-scroll">
       <table>
         <thead><tr>
-          <th>交易对</th><th>持仓方向</th><th class="numeric">整仓盈亏</th><th class="numeric">收益率</th>
+          <th>交易对</th><th>持仓方向</th><th class="numeric">平仓盈亏合计</th>
           <th class="numeric">开仓均价</th><th class="numeric">平仓均价</th><th class="numeric">平仓数量</th><th>平仓时间（UTC+8）</th>
         </tr></thead>
         <tbody>
@@ -86,10 +80,9 @@ watch([selected, page, refresh], async ([id, number], _, onCleanup) => {
             </td>
             <td>{{ row.side === 'Long' ? '多仓' : row.side === 'Short' ? '空仓' : row.side || '—' }}</td>
             <td class="numeric pnl-cell" :class="{ gain: (row.closingPnl ?? 0) > 0, loss: (row.closingPnl ?? 0) < 0 }">
-              {{ row.closingPnl == null ? '未披露' : (row.closingPnl > 0 ? '+' : '') + formatTradeAmount(row.closingPnl) }}
+              {{ row.closingPnl == null ? '披露不全' : (row.closingPnl > 0 ? '+' : '') + formatTradeAmount(row.closingPnl) }}
               <small v-if="row.closingPnl != null">{{ row.asset }}</small>
             </td>
-            <td class="numeric">{{ row.roi == null ? '—' : formatNumber(row.roi * 100) + '%' }}</td>
             <td class="numeric">{{ formatTradeAmount(row.avgCost) }}</td>
             <td class="numeric">{{ formatTradeAmount(row.avgClosePrice) }}</td>
             <td class="numeric">{{ formatNumber(row.closedVolume) }}</td>
@@ -98,7 +91,7 @@ watch([selected, page, refresh], async ([id, number], _, onCleanup) => {
         </tbody>
       </table>
       <p v-if="!rows.length" class="blank-row" role="status">
-        {{ !selected ? '添加带单组合后可查看仓位。' : loading && !currentResult ? '正在读取本地记录…' : '本地尚未记录这个组合的整仓平仓披露。' }}
+        {{ !selected ? '添加带单组合后可查看仓位。' : loading && !currentResult ? '正在读取本地记录…' : '这个组合暂无开平数量匹配的本地记录。' }}
       </p>
     </div>
     <div v-if="portfolioResult" class="ledger-footer">
@@ -106,11 +99,12 @@ watch([selected, page, refresh], async ([id, number], _, onCleanup) => {
       <span>第 {{ page }} / {{ portfolioResult.pages }} 页</span>
       <button class="text-button" :disabled="loading || page >= portfolioResult.pages" @click="page++">下一页</button>
     </div>
-  </section>
+  </div>
 </template>
 
 <style scoped>
-.position-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px 20px; padding: 0 22px 17px; }
+.position-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px 20px; padding: 16px 22px 17px; }
 .position-controls label { min-width: min(220px, 100%); }
-.position-controls p { color: var(--muted, #53675c); font-size: 14px; }
+.position-controls p { flex: 1 1 260px; color: var(--muted, #53675c); font-size: 13px; }
+.position-controls .btn { margin-left: auto; }
 </style>

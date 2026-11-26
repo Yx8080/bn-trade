@@ -2,10 +2,10 @@ import { createHash } from 'node:crypto'
 import timers from 'node:timers/promises'
 import worker from '../worker/index.js'
 import { isPlatformManualPosition } from './position-sources.js'
-import { futuresBases, getFuturesPositionMode } from '../worker/futures.js'
-import { fundedOpeningNotional } from '../worker/futures-equity.js'
-import { checkCopyLeverage } from '../worker/futures-leverage.js'
-import { decimal, scale, sizeMarketOrder, symbolRules, units } from '../worker/futures-sizing.js'
+import { futuresBase, getFuturesPositionMode } from '../worker/futures.js'
+import { prepareOpeningNotional } from '../worker/futures-equity.js'
+import { maximumCopyLeverage, readCopyLeverageLimits } from '../worker/futures-leverage.js'
+import { decimal, scale, sizedNotional, sizeMarketOrder, symbolRules, units } from '../worker/futures-sizing.js'
 import {
   ApiError, binanceRequest, getTradingEnvironment, invalidData, isClientOrderId, isDecimal,
   isPositiveDecimal, isUsdtSymbol, orderResult, requireSymbol, reserveOrder, submitFuturesOrder,
@@ -93,7 +93,7 @@ export function createCopyExchange(env, user, environment) {
   if (!user?.id || !user.apiKey || !user.apiSecret) {
     throw new ApiError(503, 'FUTURES_NOT_CONFIGURED', '此账户尚未配置合约密钥。')
   }
-  const base = futuresBases[environment]
+  const base = futuresBase
   const hedgeMode = () => new ApiError(409, 'COPY_ONE_WAY_REQUIRED', '请将币安合约账户切换为单向持仓后再启动跟单。')
 
   async function confirmOneWayMode() {
@@ -158,9 +158,42 @@ export function createCopyExchange(env, user, environment) {
     }
   }
 
+  async function openingPrices(symbol) {
+    const options = { params: { symbol } }
+    const [ticker, mark] = await Promise.all([
+      binanceRequest(env, base, '/fapi/v2/ticker/price', options),
+      binanceRequest(env, base, '/fapi/v1/premiumIndex', options),
+    ])
+    if (ticker.symbol !== symbol || mark.symbol !== symbol || !isPositiveDecimal(ticker.price) || !isPositiveDecimal(mark.markPrice)) throw invalidData()
+    return { price: units(ticker.price), mark: units(mark.markPrice) }
+  }
+
+  function openingQuantity(notional, rules, { price, mark }) {
+    const quantity = sizeMarketOrder(notional * scale / price, rules)
+    if (quantity * mark < rules.minNotional * scale) {
+      throw new ApiError(400, 'COPY_MIN_NOTIONAL', '跟单金额低于该合约的最低市价单名义价值。')
+    }
+    return quantity
+  }
+
+  async function prepareLeveragedOpening(symbol, sizingMode, amount, leverage, rules) {
+    const [prices, sizing, limits] = await Promise.all([
+      openingPrices(symbol), prepareOpeningNotional(env, base, user, sizingMode, amount),
+      readCopyLeverageLimits(env, base, user, symbol),
+    ])
+    const requested = typeof leverage === 'object' ? leverage[limits.tiers[0].leverage]
+      : typeof leverage === 'number' ? leverage : undefined
+    const selected = maximumCopyLeverage(limits, candidate => {
+      const lots = sizing.notionalAt(candidate) * scale / prices.price / rules.step
+      return (lots * rules.step * prices.mark + scale - 1n) / scale
+    }, requested)
+    const quantity = openingQuantity(sizing.fundedNotional(selected), rules, prices)
+    return { leverage: selected, quantity: decimal(quantity) }
+  }
+
   async function submit(symbol, direction, amount, clientOrderId, closing, leverage, sizingMode, guard) {
     let params
-    let checkExposure
+    let prepareOpening
     try {
       requireSymbol(symbol)
       if (!['LONG', 'SHORT'].includes(direction) || !isClientOrderId(clientOrderId)
@@ -171,27 +204,19 @@ export function createCopyExchange(env, user, environment) {
       let quantity
       if (closing) {
         quantity = sizeMarketOrder(units(amount), rules)
+      } else if (leverage != null) {
+        prepareOpening = () => prepareLeveragedOpening(symbol, sizingMode, amount, leverage, rules)
       } else {
-        const options = { params: { symbol } }
-        const [ticker, mark, { notional }] = await Promise.all([
-          binanceRequest(env, base, '/fapi/v2/ticker/price', options),
-          binanceRequest(env, base, '/fapi/v1/premiumIndex', options),
-          fundedOpeningNotional(env, base, user, sizingMode, amount, leverage),
-        ])
-        if (ticker.symbol !== symbol || mark.symbol !== symbol || !isPositiveDecimal(ticker.price) || !isPositiveDecimal(mark.markPrice)) throw invalidData()
-        quantity = sizeMarketOrder(notional * scale / units(ticker.price), rules)
-        if (quantity * units(mark.markPrice) < rules.minNotional * scale) {
-          throw new ApiError(400, 'COPY_MIN_NOTIONAL', '跟单金额低于该合约的最低市价单名义价值。')
-        }
-        if (leverage !== undefined) {
-          const orderNotional = (quantity * units(mark.markPrice) + scale - 1n) / scale
-          checkExposure = () => checkCopyLeverage(env, base, user, symbol, leverage, orderNotional)
-        }
+        const notional = sizedNotional(sizingMode, amount)
+        quantity = openingQuantity(notional, rules, await openingPrices(symbol))
       }
       const side = (direction === 'LONG') !== closing ? 'BUY' : 'SELL'
-      params = { symbol, positionSide: 'BOTH', side, type: 'MARKET', quantity: decimal(quantity),
+      params = { symbol, positionSide: 'BOTH', side, type: 'MARKET',
         newClientOrderId: clientOrderId, newOrderRespType: 'RESULT' }
-      if (!isPositiveDecimal(params.quantity)) throw invalidData()
+      if (quantity !== undefined) {
+        params.quantity = decimal(quantity)
+        if (!isPositiveDecimal(params.quantity)) throw invalidData()
+      }
       if (closing) params.reduceOnly = 'true'
       reserveOrder(env, environment, 'futures', user.id, clientOrderId)
     } catch (error) {
@@ -199,11 +224,12 @@ export function createCopyExchange(env, user, environment) {
       throw error
     }
     try {
-      const preflight = guard ? async () => {
-        if (checkExposure) await checkExposure()
-        await checkPosition(symbol, guard)
-      } : checkExposure
-      const result = await submitFuturesOrder(env, base, user, params, leverage, preflight)
+      const preflight = guard || prepareOpening ? async () => {
+        const prepared = await prepareOpening?.()
+        if (guard) await checkPosition(symbol, guard)
+        return prepared
+      } : undefined
+      const result = await submitFuturesOrder(env, base, user, params, undefined, preflight)
       return orderResult(result, symbol, clientOrderId, params)
     } catch (error) {
       // A duplicate can refer to an accepted earlier submission. Unknown status and unrecognized gateway errors require lookup.

@@ -5,6 +5,7 @@ import { createPlatformStore, matchesUnconfirmedOrder } from '../server/platform
 import { createBoundAccounts } from '../server/bound-accounts.js'
 import { createObservedTrades } from '../server/observed-trades.js'
 import { createObservedPositions } from '../server/observed-positions.js'
+import { createMonitorWatchlists } from '../server/monitor-watchlists.js'
 
 export function createLocalOrderDb(filename) {
   const database = new DatabaseSync(filename)
@@ -55,6 +56,7 @@ export function createLocalOrderDb(filename) {
   return {
     accounts,
     copy: createCopyStore(database),
+    monitorWatchlists: createMonitorWatchlists(database),
     observedTrades: createObservedTrades(database),
     observedPositions: createObservedPositions(database),
     platform,

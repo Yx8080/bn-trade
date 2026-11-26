@@ -5,18 +5,18 @@ import { MIN_LEVERAGE } from '../../shared/leverage.js'
 const props = withDefaults(defineProps<{
   label: string
   max?: number
-  sliderMax?: number
+  requireMax?: boolean
   fallback?: number
   placeholder?: string
   disabled?: boolean
-  required?: boolean
 }>(), { fallback: MIN_LEVERAGE })
 const value = defineModel<number | null>({ required: true })
 const field = useId()
 // Before a symbol limit is available, the slider is a convenient input
 // range. The adjacent number field can still specify a larger preference.
-const limit = computed(() => props.max ?? props.sliderMax ?? Math.max(150, value.value ?? 1))
+const limit = computed(() => props.max ?? Math.max(150, value.value ?? 1))
 const rangeValue = computed(() => Math.max(MIN_LEVERAGE, Math.min(limit.value, value.value ?? props.fallback)))
+const showRange = computed(() => !props.requireMax || props.max != null)
 
 function change(event: Event) {
   const input = event.target as HTMLInputElement
@@ -27,15 +27,16 @@ function change(event: Event) {
 <template>
   <div class="field leverage-field" role="group" :aria-labelledby="field + '-title'">
     <label :id="field + '-title'" :for="field">{{ label }}</label>
-    <div class="leverage-controls">
-      <div class="slider">
+    <div class="leverage-controls" :class="{ 'number-only': !showRange }">
+      <div v-if="showRange" class="slider">
         <input type="range" :min="MIN_LEVERAGE" :max="limit" step="1" :value="rangeValue"
-          :disabled="disabled" :aria-label="label + '滑块'" :aria-valuetext="rangeValue + ' 倍'" @input="change" />
-        <div class="bounds" aria-hidden="true"><span>{{ MIN_LEVERAGE }}×</span><span v-if="!max && !sliderMax">快捷范围</span><span>{{ limit }}×</span></div>
+          :disabled="disabled" :aria-label="label + '滑块'" :aria-valuetext="rangeValue + ' 倍'"
+          @input="change" />
+        <div class="bounds" aria-hidden="true"><span>{{ MIN_LEVERAGE }}×</span><span v-if="!max">快捷范围</span><span>{{ limit }}×</span></div>
       </div>
       <div class="leverage-number">
         <input :id="field" type="number" inputmode="numeric" :min="MIN_LEVERAGE" :max="max" step="1"
-          :required="required" :value="value ?? ''" :placeholder="placeholder" :disabled="disabled" @input="change" />
+          :value="value ?? ''" :placeholder="placeholder" :disabled="disabled" @input="change" />
         <span aria-hidden="true">倍</span>
       </div>
     </div>
@@ -44,6 +45,7 @@ function change(event: Event) {
 
 <style scoped>
 .leverage-controls { display: grid; grid-template-columns: minmax(70px, 1fr) minmax(65px, 90px); gap: 12px; align-items: start; }
+.leverage-controls.number-only { grid-template-columns: minmax(65px, 90px); }
 .slider input[type='range'] { display: block; width: 100%; height: 23px; padding: 0; margin: 0; accent-color: var(--green); cursor: pointer; border: 0; background: transparent; }
 .slider input:disabled { cursor: default; }
 .bounds { display: flex; justify-content: space-between; font-size: 11px; font-weight: 450; color: var(--muted); }

@@ -1,10 +1,10 @@
 import {
   ApiError, apiErrorResponse, binanceRequest, getTradingEnvironment, getTradingUser, invalidData, isClientOrderId,
-  isDecimal, isPositiveDecimal, jsonResponse, orderLookup, quoteEnvironment, readOrderJson, requireSymbol,
+  isDecimal, isPositiveDecimal, jsonResponse, orderLookup, checkTradingEnvironment, readOrderJson, requireSymbol,
 } from './trading.js'
 import { lookupPlatformOrder, submitPlatformOrder } from './platform-orders.js'
 
-export const spotBases = { testnet: 'https://testnet.binance.vision', live: 'https://api.binance.com' }
+export const spotBase = 'https://api.binance.com'
 const orderFields = new Set(['environment', 'symbol', 'quoteOrderQty', 'clientOrderId'])
 
 function fillAverage(quoteTotal, quantity) {
@@ -31,7 +31,8 @@ export function spotBalances(data) {
 async function route(request, env) {
   const { pathname, searchParams } = new URL(request.url)
   const environment = getTradingEnvironment(env)
-  const base = spotBases[environment]
+  checkTradingEnvironment(request.headers.get('X-Trading-Environment'), searchParams)
+  const base = spotBase
   const methods = {
     '/api/spot/quote': ['GET'], '/api/spot/account': ['GET'], '/api/spot/orders': ['GET', 'POST'],
   }[pathname]
@@ -40,11 +41,10 @@ async function route(request, env) {
     return jsonResponse({ code: 'METHOD_NOT_ALLOWED', message: '请求方法无效。' }, 405, { Allow: methods.join(', ') })
   }
   if (pathname === '/api/spot/quote') {
-    const market = quoteEnvironment(searchParams, environment)
     const symbol = requireSymbol(searchParams.get('symbol'))
-    const ticker = await binanceRequest(env, spotBases[market], '/api/v3/ticker/price', { params: { symbol } })
+    const ticker = await binanceRequest(env, base, '/api/v3/ticker/price', { params: { symbol } })
     if (ticker.symbol !== symbol || !isPositiveDecimal(ticker.price)) throw invalidData()
-    return jsonResponse({ symbol, lastPrice: ticker.price, environment: market, time: Date.now() })
+    return jsonResponse({ symbol, lastPrice: ticker.price, environment, time: Date.now() })
   }
   const user = await getTradingUser(request, env)
   if (!user.spotApiKey || !user.spotApiSecret) throw new ApiError(503, 'SPOT_NOT_CONFIGURED', '此账户尚未配置现货密钥。')

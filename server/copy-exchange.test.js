@@ -21,7 +21,7 @@ function exchange(fetchBinance, lease = {}) {
     reserved.add(key)
     return true
   } }
-  return createCopyExchange({ fetchBinance, orderStore }, user, 'testnet')
+  return createCopyExchange({ fetchBinance, orderStore }, user, 'live')
 }
 
 const row = { symbol: 'BTCUSDT', side: 'SELL', positionSide: 'SHORT', type: 'MARKET', orderTime: 999900,
@@ -91,7 +91,7 @@ test('positions confirms actual account mode and preserves the signed direction'
 
 function orderMock(onOrder) {
   return (url, init) => {
-    assert.equal(url.origin, 'https://demo-fapi.binance.com')
+    assert.equal(url.origin, 'https://fapi.binance.com')
     if (url.pathname === '/fapi/v1/exchangeInfo') return Response.json({ symbols: [market] })
     if (url.pathname === '/fapi/v2/ticker/price') return Response.json({ symbol: 'BTCUSDT', price: '11' })
     if (url.pathname === '/fapi/v1/premiumIndex') return Response.json({ symbol: 'BTCUSDT', markPrice: '10' })
@@ -297,9 +297,10 @@ test('fixed margin and current equity percentage size each entry before lot roun
   equity = '500'
   await client.open('BTCUSDT', 'LONG', '2.3', 'add', 5, 'equityPercent')
   assert.deepEqual(quantities, ['9.1', '10.45', '5.22'])
-  for (const missing of [undefined, '0', '-1']) {
-    equity = missing
-    await assert.rejects(client.open('BTCUSDT', 'LONG', '2.3', 'missing', 5, 'equityPercent'), { definite: true })
+  for (const [index, balance] of [undefined, '0', '-1'].entries()) {
+    equity = balance
+    await assert.rejects(client.open('BTCUSDT', 'LONG', '2.3', 'invalid-equity-' + index, 5, 'equityPercent'),
+      { code: balance === undefined ? 'INVALID_UPSTREAM_DATA' : 'FUTURES_EQUITY_UNAVAILABLE', definite: true })
   }
   assert.equal(equityReads, 6)
   assert.equal(leverageChanges, 3)
@@ -337,8 +338,9 @@ test('each entry checks the fresh USDT budget before leverage and never gates a 
   assert.deepEqual(actions, ['leverage', 'open', 'true'])
 })
 
-test('150x copy entries use the actual signal symbol and projected marked position size for fixed and percent margins', async () => {
+test('fixed leverage is capped by the actual symbol and projected position before sizing fixed and percent margins', async () => {
   let existing = '0'
+  let symbolMaximum = 150
   let available = true
   const sent = []
   const mock = orderMock(params => { sent.push(params.get('quantity')); return receipt(params) })
@@ -347,8 +349,8 @@ test('150x copy entries use the actual signal symbol and projected marked positi
       assert.equal(url.searchParams.get('symbol'), 'BTCUSDT')
       assert.ok(url.searchParams.get('signature'))
       return available ? Response.json({ symbol: 'BTCUSDT', brackets: [
-        { notionalFloor: 0, notionalCap: 100, initialLeverage: 150 },
-        { notionalFloor: 100, notionalCap: 10000, initialLeverage: 60 },
+        { notionalFloor: 0, notionalCap: 100, initialLeverage: symbolMaximum },
+        { notionalFloor: 100, notionalCap: 10000, initialLeverage: Math.min(60, symbolMaximum) },
       ] }) : new Response('', { status: 429, headers: { 'Retry-After': '11' } })
     }
     if (url.pathname === '/fapi/v3/positionRisk') return Response.json([{ symbol: 'BTCUSDT', notional: existing }])
@@ -363,14 +365,71 @@ test('150x copy entries use the actual signal symbol and projected marked positi
   })
   await client.open('BTCUSDT', 'LONG', 0.1, 'valid', 150, 'margin')
   existing = '90'
-  for (const mode of ['margin', 'equityPercent']) {
-    await assert.rejects(client.open('BTCUSDT', 'LONG', 0.1, mode, 150, mode),
-      error => error.code === 'COPY_LEVERAGE_LIMIT' && error.definite && error.message.includes('该档最高 60 倍'))
-  }
+  await client.open('BTCUSDT', 'LONG', 0.1, 'smaller-margin', 150, 'margin')
+  await client.open('BTCUSDT', 'LONG', 1, 'smaller-equity', 150, 'equityPercent')
+  existing = '0'
+  symbolMaximum = 5
+  await client.open('BTCUSDT', 'LONG', 2, 'five-times', 10, 'margin')
   available = false
   await assert.rejects(client.open('BTCUSDT', 'LONG', 0.1, 'limited', 150, 'margin'),
     { code: 'COPY_LEVERAGE_UNAVAILABLE', status: 429, headers: { 'Retry-After': '11' }, definite: true })
-  assert.deepEqual(sent, [150, '1.36'])
+  assert.deepEqual(sent, [150, '1.36', 111, '1', 60, '5.45', 5, '0.9'])
+})
+
+test('automatic and custom leverage use the symbol maximum and respect the projected bracket under the symbol lease', async () => {
+  let claimed = false
+  let existing = '0'
+  let symbolMaximum = 150
+  let available = '50'
+  let accountReads = 0
+  const sent = []
+  const mock = orderMock(params => { sent.push(params.get('quantity')); return receipt(params) })
+  const client = exchange((url, init) => {
+    if (url.pathname === '/fapi/v1/leverageBracket') {
+      assert.equal(claimed, true)
+      assert.equal(url.searchParams.get('symbol'), 'BTCUSDT')
+      return Response.json({ symbol: 'BTCUSDT', brackets: [
+        { notionalFloor: 0, notionalCap: 100, initialLeverage: symbolMaximum },
+        { notionalFloor: 100, notionalCap: 10000, initialLeverage: Math.min(60, symbolMaximum) },
+      ] })
+    }
+    if (url.pathname === '/fapi/v3/positionRisk') return Response.json([{ symbol: 'BTCUSDT', notional: existing }])
+    if (url.pathname === '/fapi/v2/account') {
+      accountReads++
+      return Response.json({ multiAssetsMargin: false, totalMarginBalance: '100',
+        assets: [{ asset: 'USDT', availableBalance: available }] })
+    }
+    if (url.pathname === '/fapi/v1/leverage') {
+      assert.equal(claimed, true)
+      const leverage = Number(new URLSearchParams(init.body).get('leverage'))
+      sent.push(leverage)
+      return Response.json({ symbol: 'BTCUSDT', leverage })
+    }
+    return mock(url, init)
+  }, {
+    claimFuturesSymbol() { claimed = true; return true },
+    releaseFuturesSymbol() { claimed = false },
+  })
+  await client.open('BTCUSDT', 'LONG', 0.1, 'max-flat', 'max', 'margin')
+  const custom = { 150: 50, 100: 20 }
+  await client.open('BTCUSDT', 'LONG', 0.22, 'custom-150', custom, 'margin')
+  existing = '90'
+  await client.open('BTCUSDT', 'LONG', 0.1, 'max-add', 'max', 'equityPercent')
+  await client.open('BTCUSDT', 'LONG', 1, 'custom-add', { 150: 75 }, 'equityPercent')
+  existing = '10000'
+  await assert.rejects(client.open('BTCUSDT', 'LONG', 1, 'max-full', 'max', 'margin'),
+    { code: 'COPY_LEVERAGE_LIMIT', definite: true })
+  existing = '0'
+  symbolMaximum = 100
+  await client.open('BTCUSDT', 'LONG', 0.55, 'custom-100', custom, 'margin')
+  symbolMaximum = 125
+  await client.open('BTCUSDT', 'LONG', 0.1, 'custom-unlisted', custom, 'margin')
+  available = '0'
+  await assert.rejects(client.open('BTCUSDT', 'LONG', 0.1, 'max-budget', 'max', 'margin'),
+    { code: 'INSUFFICIENT_AVAILABLE_MARGIN', definite: true })
+  assert.equal(claimed, false)
+  assert.equal(accountReads, 8)
+  assert.deepEqual(sent, [150, '1.36', 50, '1', 111, '1', 60, '5.45', 20, '1', 125, '1.13'])
 })
 
 test('account trade settlement requires complete matching fills with precise order IDs and signed fees', async () => {

@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { bindAccount, getBindingEnvironment, getCopyStatus, getSelectedEnvironment, getSpotQuote, revokeSession,
-  selectEnvironment, setUnauthorizedHandler, submitOrder, updateCopyStatus } from '../src/futures.ts'
+import { bindAccount, getBindingEnvironment, getCopyStatus, getSpotQuote, revokeSession,
+  setUnauthorizedHandler, submitOrder, updateCopyStatus } from '../src/futures.ts'
 import { pendingOrderKey, readPending, restorePreviousPending, writePending } from '../src/components/pendingOrder.ts'
 
-const credentials = { environment: 'testnet', apiKey: 'sample-key', apiSecret: 'sample-secret' }
+const credentials = { environment: 'live', apiKey: 'sample-key', apiSecret: 'sample-secret' }
 const capabilities = { identity: 'binance-uid', credentialStorage: 'memory' }
 const uid = '12345678901234567890'
-const session = { environment: 'testnet', id: 'uid:spot-testnet:' + uid, uid, issuer: 'spot-testnet',
+const session = { environment: 'live', id: 'uid:' + uid, uid, issuer: 'live',
   name: '测试账户', markets: ['spot'], expiresAt: Date.now() + 60_000, token: 'sample-session' }
 
 test('读取服务环境、验证凭据和注销使用正确的请求位置', async t => {
@@ -16,8 +16,8 @@ test('读取服务环境、验证凭据和注销使用正确的请求位置', as
     calls.push([url, init.method])
     assert.equal(init.cache, 'no-store')
     assert.equal(init.redirect, 'error')
-    assert.equal(new Headers(init.headers).get('X-Trading-Environment'), 'testnet')
-    if (init.method === 'GET') return Response.json({ environment: 'testnet', ...capabilities })
+    assert.equal(new Headers(init.headers).get('X-Trading-Environment'), 'live')
+    if (init.method === 'GET') return Response.json({ environment: 'live', ...capabilities })
     if (init.method === 'POST') {
       assert.deepEqual(JSON.parse(init.body), { ...credentials, identity: 'binance-uid' })
       assert.equal(new Headers(init.headers).has('Authorization'), false)
@@ -27,33 +27,25 @@ test('读取服务环境、验证凭据和注销使用正确的请求位置', as
     assert.equal(init.body, undefined)
     return new Response(null, { status: 204 })
   })
-  assert.equal(await getBindingEnvironment(), 'testnet')
+  assert.equal(await getBindingEnvironment(), 'live')
   assert.deepEqual(await bindAccount(credentials), session)
   await revokeSession(session.token)
   assert.deepEqual(calls, [['/api/accounts/bind', 'GET'], ['/api/accounts/bind', 'POST'], ['/api/accounts/session', 'DELETE']])
 })
 
-test('切换时仅请求选中的环境，迟到的会话清理回到发起绑定的环境', async t => {
+test('公开行情、跟单查询和无效会话回收都使用实盘', async t => {
   const calls = []
-  const pending = Promise.withResolvers()
-  t.after(() => selectEnvironment('testnet'))
   t.mock.method(globalThis, 'fetch', (url, init) => {
     const environment = new Headers(init.headers).get('X-Trading-Environment')
     calls.push([init.method, environment])
-    if (init.method === 'POST') return pending.promise
+    if (init.method === 'POST') return Response.json({ ...session, markets: [] })
     if (init.method === 'DELETE') return new Response(null, { status: 204 })
-    return Response.json({ environment, ...capabilities })
+    return Response.json({})
   })
-  selectEnvironment('live')
-  assert.equal(getSelectedEnvironment(), 'live')
-  assert.equal(await getBindingEnvironment(), 'live')
-  const login = bindAccount({ ...credentials, environment: 'live' })
-  selectEnvironment('testnet')
-  await getCopyStatus('testnet-token')
-  await getSpotQuote('BTCUSDT', undefined, 'testnet')
-  pending.resolve(Response.json({ ...session, environment: 'live', markets: [] }))
-  await assert.rejects(login, /无效的会话/)
-  assert.deepEqual(calls, [['GET','live'], ['POST','live'], ['GET','testnet'], ['GET','testnet'], ['DELETE','live']])
+  await getCopyStatus('fixture-token')
+  await getSpotQuote('BTCUSDT')
+  await assert.rejects(bindAccount(credentials), /无效的会话/)
+  assert.deepEqual(calls, [['GET', 'live'], ['GET', 'live'], ['POST', 'live'], ['DELETE', 'live']])
 })
 
 test('只在后台明确支持内存密钥和 UID 时允许打开绑定表单', async t => {
@@ -61,20 +53,18 @@ test('只在后台明确支持内存密钥和 UID 时允许打开绑定表单', 
   t.mock.method(globalThis, 'fetch', (_url, init) => {
     assert.equal(init.method, 'GET')
     assert.equal(init.body, undefined)
-    return Response.json({ environment: 'testnet', ...fields })
+    return Response.json({ environment: 'live', ...fields })
   })
   for (fields of [{}, { identity: 'binance-uid', credentialStorage: 'sqlite' }, { credentialStorage: 'memory' }]) {
     await assert.rejects(getBindingEnvironment(), { code: 'INCOMPATIBLE_BINDING', message: /重启/ })
   }
   fields = capabilities
-  assert.equal(await getBindingEnvironment(), 'testnet')
+  assert.equal(await getBindingEnvironment(), 'live')
 })
 
 test('拒绝提交其他环境的订单、跟单和密钥，阻止过期环境回执进入绑定表单', async t => {
-  selectEnvironment('live')
-  t.after(() => selectEnvironment('testnet'))
   const transport = t.mock.method(globalThis, 'fetch', () => Response.json({ environment: 'testnet' }))
-  await assert.rejects(bindAccount(credentials), { code: 'ENVIRONMENT_CHANGED' })
+  await assert.rejects(bindAccount({ ...credentials, environment: 'testnet' }), { code: 'ENVIRONMENT_CHANGED' })
   await assert.rejects(submitOrder('previous', { symbol: 'BTCUSDT', clientOrderId: 'old', environment: 'testnet',
     positionSide: 'BOTH', side: 'BUY', type: 'MARKET', quantity: '1' }), { code: 'ENVIRONMENT_CHANGED' })
   await assert.rejects(updateCopyStatus('previous', { action: 'pause', environment: 'testnet' }), { code: 'ENVIRONMENT_CHANGED' })
@@ -121,21 +111,20 @@ test('旧工作区忙、迁移冲突和绑定协议不兼容给出具体提示',
   }
 })
 
-test('已验证的实盘旧工作区可以恢复待核实订单，测试平台各自隔离', async t => {
+test('只允许已验证的实盘旧工作区恢复待核实订单', async t => {
   const oldId = 'bound-' + 'e'.repeat(64)
   const serverReply = { ...session, id: 'uid:42', uid: '42', issuer: 'live', environment: 'live', previousWorkspaceId: oldId }
   const records = new Map()
-  t.mock.method(globalThis, 'fetch', () => Response.json({ ...serverReply, apiSecret: 'unexpected' }))
+  t.mock.method(globalThis, 'fetch', (_url, init) => init.method === 'DELETE' ? new Response(null, { status: 204 })
+    : Response.json({ ...serverReply, apiSecret: 'unexpected' }))
   const original = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
   Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: {
     getItem: key => records.get(key) ?? null, setItem: (key, value) => records.set(key, value), removeItem: key => records.delete(key),
   } })
   t.after(() => {
-    selectEnvironment('testnet')
     if (original) Object.defineProperty(globalThis, 'sessionStorage', original)
     else delete globalThis.sessionStorage
   })
-  selectEnvironment('live')
   const result = await bindAccount({ ...credentials, environment: 'live' })
   assert.deepEqual(result, serverReply)
   const prior = pendingOrderKey(oldId, 'live', 'spot')
@@ -145,13 +134,11 @@ test('已验证的实盘旧工作区可以恢复待核实订单，测试平台�
   restorePreviousPending(result)
   assert.equal(readPending(prior), null)
   assert.deepEqual(readPending(current), order)
-  selectEnvironment('testnet')
   serverReply.environment = 'testnet'
   serverReply.id = 'uid:spot-testnet:42'
   serverReply.issuer = 'spot-testnet'
-  const testSession = await bindAccount(credentials)
-  assert.equal('previousWorkspaceId' in testSession, false)
-  assert.equal(readPending(pendingOrderKey(testSession.id, 'testnet', 'spot')), null)
+  await assert.rejects(bindAccount(credentials), /无效的会话/)
+  assert.equal(readPending(pendingOrderKey(serverReply.id, 'testnet', 'spot')), null)
   writePending(current, null)
 })
 

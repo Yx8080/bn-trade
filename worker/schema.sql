@@ -67,6 +67,10 @@ CREATE TABLE IF NOT EXISTS legacy_account_owners (
   PRIMARY KEY(environment, key_hash)
 );
 
+CREATE TABLE IF NOT EXISTS monitor_watchlists (
+  owner_id TEXT PRIMARY KEY, portfolio_ids TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS observed_trades (
   revision INTEGER PRIMARY KEY, portfolio_id TEXT NOT NULL, trade_key TEXT NOT NULL,
   updated_at INTEGER NOT NULL, payload TEXT NOT NULL, superseded_at_revision INTEGER
@@ -74,9 +78,3 @@ CREATE TABLE IF NOT EXISTS observed_trades (
 CREATE INDEX IF NOT EXISTS observed_trades_current ON observed_trades(portfolio_id, trade_key)
   WHERE superseded_at_revision IS NULL;
 CREATE INDEX IF NOT EXISTS observed_trades_page ON observed_trades(portfolio_id, updated_at DESC, revision DESC);
-
-CREATE TABLE IF NOT EXISTS observed_positions (
-  portfolio_id TEXT NOT NULL, position_id TEXT NOT NULL, closed_at INTEGER NOT NULL, payload TEXT NOT NULL,
-  PRIMARY KEY(portfolio_id, position_id)
-);
-CREATE INDEX IF NOT EXISTS observed_positions_time ON observed_positions(portfolio_id,closed_at DESC,position_id DESC);

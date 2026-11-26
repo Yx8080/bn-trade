@@ -1,6 +1,6 @@
 import { ledgerIdentity } from './platform-store.js'
-import { futuresBases, futuresPositions } from '../worker/futures.js'
-import { spotBalances, spotBases } from '../worker/spot.js'
+import { futuresBase, futuresPositions } from '../worker/futures.js'
+import { spotBalances, spotBase } from '../worker/spot.js'
 import { ApiError, apiErrorResponse, binanceRequest, getTradingEnvironment, getTradingUser, invalidData,
   isPositiveDecimal, jsonResponse } from '../worker/trading.js'
 
@@ -30,9 +30,9 @@ export function manualPositionBasis(fills) {
   return [...positions.values()]
 }
 
-async function valueFutures(env, user, environment, fills, positions, copySymbols) {
+async function valueFutures(env, user, fills, positions, copySymbols) {
   if (!positions.length) return
-  const risk = await binanceRequest(env, futuresBases[environment], '/fapi/v3/positionRisk', { credentials: user })
+  const risk = await binanceRequest(env, futuresBase, '/fapi/v3/positionRisk', { credentials: user })
   const live = futuresPositions(risk)
   const ownTrades = new Set(fills.map(f => f.symbol + '/' + f.tradeId))
   for (const p of positions) {
@@ -41,7 +41,7 @@ async function valueFutures(env, user, environment, fills, positions, copySymbol
     if (match?.marginAsset !== 'USDT' || !near(Number(match.quantity), p.quantity) || !near(Number(match.entryPrice), p.entryPrice, 1e-6)) continue
     // An external close and reopen can leave exactly the same quantity and entry price.
     // Verify the fills on this leg since the platform first opened the current position.
-    const trades = await binanceRequest(env, futuresBases[environment], '/fapi/v1/userTrades', {
+    const trades = await binanceRequest(env, futuresBase, '/fapi/v1/userTrades', {
       credentials: user, params: { symbol: p.symbol, fromId: p.firstTradeId, limit: 1000 } })
     if (!Array.isArray(trades) || trades.some(t => t.symbol !== p.symbol || !['BOTH', 'LONG', 'SHORT'].includes(t.positionSide))) throw invalidData()
     if (trades.length >= 1000 || !trades.some(t => t.id === p.firstTradeId)
@@ -50,10 +50,10 @@ async function valueFutures(env, user, environment, fills, positions, copySymbol
   }
 }
 
-async function valueSpot(env, user, environment, rows) {
+async function valueSpot(env, user, rows) {
   if (!rows.length) return
   const credentials = { apiKey: user.spotApiKey, apiSecret: user.spotApiSecret }
-  const base = spotBases[environment]
+  const base = spotBase
   const balances = spotBalances(await binanceRequest(env, base, '/api/v3/account', { credentials, params: { omitZeroBalances: 'true' } }))
   for (const row of rows) {
     const balance = balances.find(item => item.asset === row.symbol.slice(0, -4))
@@ -89,7 +89,7 @@ export async function platformPnl(request, env) {
     const manualPositions = manualPositionBasis(fills)
     const strategy = db.copy.read(environment, user.id)?.state
     const copySymbols = new Set(strategy?.keyIdentity === keys.futures ? strategy.positions.map(p => p.symbol) : [])
-    const checks = await Promise.allSettled([valueSpot(env, user, environment, spot), valueFutures(env, user, environment, fills, manualPositions, copySymbols)])
+    const checks = await Promise.allSettled([valueSpot(env, user, spot), valueFutures(env, user, fills, manualPositions, copySymbols)])
     const hasUnknown = [...spot, ...manualPositions].some(p => p.unrealized == null)
     const valuationError = checks.some(result => result.status === 'rejected') ? '部分持仓行情或交易所记录暂时无法核对。'
       : hasUnknown ? '部分持仓无法与平台成交单独匹配，未计入浮动盈亏。' : ''

@@ -27,7 +27,6 @@ import WorkspaceDialog from './WorkspaceDialog.vue'
 import LeverageControl from './LeverageControl.vue'
 import OpeningBalance from './OpeningBalance.vue'
 import { isAppLeverage } from '../../shared/leverage.js'
-import { useFuturesLeverage } from '../useFuturesLeverage'
 import { pendingOrderKey, readPending, writePending, type PendingOrder } from './pendingOrder'
 
 const props = defineProps<{
@@ -42,8 +41,12 @@ const props = defineProps<{
   funds: OpeningFunds
   positions: Position[]
   active: boolean
+  currentLeverage?: number
+  maxLeverage?: number
+  leverageError: string
+  leverageLoading: boolean
 }>()
-const emit = defineEmits<{ connect: []; ordered: []; refresh: [] }>()
+const emit = defineEmits<{ connect: []; ordered: []; refresh: []; refreshLeverage: [] }>()
 const futures = computed(() => props.market === 'futures')
 const mode = ref<FuturesPositionMode | null>(null)
 const modeError = ref('')
@@ -80,11 +83,7 @@ const limit = ref('')
 const leverage = ref<number | null>(null)
 const leverageExpanded = ref(false)
 const leveragePanelId = useId()
-const { info: tiers, error: leverageError, loading: leverageLoading, refresh: refreshLeverage } =
-  useFuturesLeverage(() => futures.value ? props.symbol : '', () => props.session, () => props.token)
-const currentLeverage = computed(() => tiers.value?.leverage ?? undefined)
-const maxLeverage = computed(() => tiers.value?.maxLeverage ?? tiers.value?.symbolMaxLeverage)
-const effectiveLeverage = computed(() => leverage.value ?? currentLeverage.value)
+const effectiveLeverage = computed(() => leverage.value ?? props.currentLeverage)
 const failure = ref('')
 const inFlight = ref(false)
 const key = pendingOrderKey(props.session?.id, props.environment, props.market)
@@ -106,6 +105,15 @@ const awaitingFunds = computed(() => props.funds.state !== 'ready' || props.fund
 const openingAmount = computed(() => sizeMode.value === 'margin' ? marginAmount.value
   : sizeMode.value === 'equityPercent' ? equityPercent.value : quantity.value)
 const orderPrice = computed(() => Number(type.value === 'LIMIT' ? limit.value : props.price))
+function pnlDefaults() {
+  return {
+    entry: type.value === 'LIMIT' && positive(limit.value) ? limit.value : '',
+    margin: sizeMode.value === 'margin' && positive(marginAmount.value) ? marginAmount.value : '',
+    leverage: effectiveLeverage.value,
+  }
+}
+defineExpose({ pnlDefaults })
+
 function selectMargin(amount: number) {
   marginAmount.value = Number.isFinite(amount) && amount > 0 ? amount.toFixed(8).replace(/\.?0+$/, '') : ''
 }
@@ -121,10 +129,11 @@ function insufficientFunds(margin: number | null) {
   return '预计开仓需 ' + formatNumber(margin) + ' USDT 保证金，超过可用余额。'
 }
 const inputIssue = computed(() => {
-  if (!futures.value || !props.session) return ''
+  if (!futures.value) return ''
+  if (leverage.value != null && !isAppLeverage(leverage.value, props.maxLeverage))
+    return props.maxLeverage ? '杠杆倍数须为 1 至 ' + props.maxLeverage + ' 的整数。' : '杠杆倍数须为正整数。'
+  if (!props.session) return ''
   if (type.value === 'LIMIT' && limit.value && !positive(limit.value)) return '请输入大于 0 的限价。'
-  if (leverage.value != null && !isAppLeverage(leverage.value, maxLeverage.value))
-    return maxLeverage.value ? '杠杆倍数须为 1 至 ' + maxLeverage.value + ' 的整数。' : '杠杆倍数须为正整数。'
   if (sizeMode.value === 'equityPercent')
     return equityPercent.value && (!positive(equityPercent.value) || Number(equityPercent.value) > 100) ? '请输入大于 0 且不超过 100 的比例。' : ''
   if (openingAmount.value && !positive(openingAmount.value)) return sizeMode.value === 'margin' ? '请输入大于 0 的保证金。' : '请输入大于 0 的合约数量。'
@@ -134,7 +143,7 @@ function directionIssue(direction: ManualDirection) {
   if (!futures.value || !props.session || !mode.value) return ''
   if (awaitingFunds.value || !positive(openingAmount.value)) return ''
   const margin = openingMarginFor(direction)
-  if (!effectiveLeverage.value && !leverageLoading.value && (sizeMode.value !== 'quantity' || margin !== 0))
+  if (!effectiveLeverage.value && !props.leverageLoading && (sizeMode.value !== 'quantity' || margin !== 0))
     return '请填写合约杠杆倍数，以核对开仓所需保证金。'
   return insufficientFunds(margin)
 }
@@ -171,7 +180,7 @@ watch([mode, type, leverage, limit, sizeMode, marginAmount, equityPercent, quant
   invalidatePreview()
   failure.value = ''
 }, { flush: 'sync' })
-watch([currentLeverage, maxLeverage], invalidatePreview, { flush: 'sync' })
+watch([() => props.currentLeverage, () => props.maxLeverage], invalidatePreview, { flush: 'sync' })
 watch(() => props.active, active => {
   if (!active) {
     invalidatePreview()
@@ -219,7 +228,7 @@ function canPreviewDirection(direction: ManualDirection) {
   if (type.value === 'LIMIT' && !positive(limit.value)) return false
   if (!positive(openingAmount.value)) return false
   if (sizeMode.value === 'quantity') return openingMarginFor(direction) != null
-  return isAppLeverage(effectiveLeverage.value, maxLeverage.value)
+  return isAppLeverage(effectiveLeverage.value, props.maxLeverage)
 }
 function beginPreview() {
   if (!props.active || preview.value || calculating.value || inFlight.value || pending.value) return
@@ -283,7 +292,7 @@ async function previewDirection(direction: ManualDirection) {
   }
   if (!canPreviewDirection(direction) || !checkQuote()) return
   preview.value = {
-    kind: 'futures', direction, accountLeverage: currentLeverage.value,
+    kind: 'futures', direction, accountLeverage: props.currentLeverage,
     sizing, percent: sizing && sizeMode.value === 'equityPercent' ? amount : undefined,
     input: {
       ...shared, ...action, type: type.value, quantity: sizing?.quantity ?? quantity.value,
@@ -327,7 +336,7 @@ async function confirm() {
     failure.value = cause instanceof Error ? cause.message : '订单响应未收到，请按订单编号查询。'
   } finally {
     inFlight.value = false
-    if (mounted && order.kind === 'futures') refreshLeverage()
+    if (mounted && order.kind === 'futures') emit('refreshLeverage')
   }
 }
 async function reconcile() {
@@ -365,9 +374,7 @@ function positionName(value: string) {
         <div class="title-icon"><Tickets /></div>
         <h2>市价买入</h2>
       </div>
-      <span class="env" :class="{ live: environment === 'live' }">
-        {{ environment === 'live' ? '实盘' : '测试网' }}
-      </span>
+      <span class="env live">实盘</span>
     </div>
     <form class="ticket-form" :aria-busy="inFlight || calculating" :aria-describedby="formIssue ? leveragePanelId + '-issue' : undefined" @submit.prevent="prepare">
       <template v-if="futures">
@@ -388,12 +395,12 @@ function positionName(value: string) {
           <button type="button" class="text-button" @click="modeRefresh++">重试</button>
         </p>
         <div v-show="leverageExpanded" :id="leveragePanelId" class="leverage-panel">
-          <LeverageControl v-model="leverage" label="合约杠杆倍数" :max="maxLeverage"
+          <LeverageControl v-model="leverage" label="合约杠杆倍数" :max="maxLeverage" require-max
             :fallback="currentLeverage" :placeholder="currentLeverage ? String(currentLeverage) : '沿用'" />
-          <p v-if="leverageLoading" class="ticket-hint" role="status">正在读取账户杠杆…</p>
+          <p v-if="leverageLoading" class="ticket-hint" role="status">正在读取币安杠杆档位…</p>
         </div>
         <p v-if="leverageError" class="notice warning" role="status">{{ leverageError }}
-          <button type="button" class="text-button" @click="refreshLeverage">重读杠杆档位</button>
+          <button type="button" class="text-button" @click="emit('refreshLeverage')">重读杠杆档位</button>
         </p>
 
         <div class="manual-order-types" role="group" aria-label="订单类型">
@@ -473,13 +480,13 @@ function positionName(value: string) {
     </div>
     <WorkspaceDialog
       v-if="preview && session"
-      :title="session.environment === 'live' ? '确认提交实盘订单' : '确认提交测试网订单'"
+      title="确认提交实盘订单"
       @close="preview = null"
     >
       <dl class="order-review">
         <div>
           <dt>交易账户</dt>
-          <dd>UID {{ session.uid }} · {{ session.environment === 'live' ? '实盘' : '测试网' }}</dd>
+          <dd>UID {{ session.uid }} · 实盘</dd>
         </div>
         <div>
           <dt>交易对</dt>
@@ -538,7 +545,7 @@ function positionName(value: string) {
       <div class="dialog-actions">
         <button type="button" class="btn" @click="preview = null">返回修改</button>
         <button type="button" class="btn primary" @click="confirm">
-          {{ session.environment === 'live' ? '确认实盘下单' : '确认测试网下单' }}
+          确认实盘下单
         </button>
       </div>
     </WorkspaceDialog>

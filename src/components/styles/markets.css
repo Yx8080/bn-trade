@@ -34,6 +34,9 @@
   min-width: 0;
 }
 .futures-actions > .ledger-heading { padding-bottom: 5px; }
+.order-heading-actions { display: flex; align-items: center; gap: 8px; }
+.order-heading-actions .env { white-space: nowrap; }
+.order-heading-actions .btn { padding-inline: 9px; color: var(--green); }
 html:has(.futures-workspace) { scrollbar-gutter: stable; }
 .order-tabs {
   display: flex;
@@ -134,31 +137,6 @@ html:has(.futures-workspace) { scrollbar-gutter: stable; }
 .quote-mark strong {
   color: #f4f7ec;
   margin-left: 4px;
-}
-.pnl-estimate {
-  margin-top: 15px;
-  border-top: 1px solid var(--line);
-  padding-top: 12px;
-}
-.pnl-estimate summary {
-  cursor: pointer;
-  color: var(--green);
-  font-size: 13px;
-  font-weight: 620;
-}
-.estimate-fields {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 9px;
-  margin-top: 12px;
-}
-.estimated-result {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  align-items: baseline;
-  margin: 12px 0 5px;
-  font-size: 13px;
 }
 .quote-time {
   margin-top: 14px;

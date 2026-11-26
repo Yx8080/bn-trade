@@ -43,7 +43,7 @@ function timeOf(value) {
 
 // Price strings can carry more significant digits than a JavaScript number.
 // Canonicalize the source digits for identity, including equivalent exponents.
-function exactAmount(value) {
+export function exactAmount(value) {
   if (value == null || value === '') return null
   const [coefficient, exponent = '0'] = String(value).trim().toLowerCase().split('e')
   const [integer, fraction = ''] = coefficient.replace(/^[+-]/, '').split('.')

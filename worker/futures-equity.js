@@ -32,22 +32,30 @@ function closingNotional(positions, order) {
   return units(position.positionAmt.replace(/^-/, '')) * units(order.price) / scale
 }
 
+export async function prepareOpeningNotional(env, base, user, mode, amount, order) {
+  const account = await binanceRequest(env, base, '/fapi/v2/account', { credentials: user })
+  const equity = mode === 'equityPercent' ? await equityInUsdt(env, base, account) : null
+  const notionalAt = leverage => sizedNotional(mode, amount, leverage, equity)
+  function fundedNotional(leverage) {
+    const notional = notionalAt(leverage)
+    const opening = notional - closingNotional(account.positions, order)
+    if (opening > 0n) {
+      const available = Array.isArray(account.assets) && account.assets.find(asset => asset?.asset === 'USDT')?.availableBalance
+      if (!isDecimal(available)) throw new ApiError(502, 'FUTURES_BALANCE_UNAVAILABLE', '无法读取合约账户的 USDT 可用余额。')
+      const multiplier = BigInt(leverage)
+      if (available.startsWith('-') || opening > units(available) * multiplier) {
+        const margin = decimal((opening + multiplier - 1n) / multiplier)
+        throw new ApiError(409, 'INSUFFICIENT_AVAILABLE_MARGIN', '开仓所需保证金约 ' + margin + ' USDT，当前可用余额为 ' + available + ' USDT。')
+      }
+    }
+    return notional
+  }
+  return { notionalAt, fundedNotional, equity }
+}
+
 export async function fundedOpeningNotional(env, base, user, mode, amount, leverage, order) {
   // Legacy fixed-notional strategies inherit the exchange leverage for each symbol.
   if (mode === 'notional' && leverage == null) return { notional: sizedNotional(mode, amount), equity: null }
-
-  const account = await binanceRequest(env, base, '/fapi/v2/account', { credentials: user })
-  const equity = mode === 'equityPercent' ? await equityInUsdt(env, base, account) : null
-  const notional = sizedNotional(mode, amount, leverage, equity)
-  const opening = notional - closingNotional(account.positions, order)
-  if (opening > 0n) {
-    const available = Array.isArray(account.assets) && account.assets.find(asset => asset?.asset === 'USDT')?.availableBalance
-    if (!isDecimal(available)) throw new ApiError(502, 'FUTURES_BALANCE_UNAVAILABLE', '无法读取合约账户的 USDT 可用余额。')
-    const multiplier = BigInt(leverage)
-    if (available.startsWith('-') || opening > units(available) * multiplier) {
-      const margin = decimal((opening + multiplier - 1n) / multiplier)
-      throw new ApiError(409, 'INSUFFICIENT_AVAILABLE_MARGIN', '开仓所需保证金约 ' + margin + ' USDT，当前可用余额为 ' + available + ' USDT。')
-    }
-  }
-  return { notional, equity }
+  const { fundedNotional, equity } = await prepareOpeningNotional(env, base, user, mode, amount, order)
+  return { notional: fundedNotional(leverage), equity }
 }

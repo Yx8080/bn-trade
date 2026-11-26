@@ -109,7 +109,7 @@ function pnl(value: number) {
   </section>
   <template v-else>
     <div class="pnl-account"><strong>{{ session.name }}</strong>
-      <span class="env" :class="{ live: session.environment === 'live' }">{{ session.environment === 'live' ? '实盘' : '测试网' }}</span>
+      <span class="env live">实盘</span>
     </div>
     <p v-for="message in errors" :key="message" class="notice error" role="alert">{{ message }}</p>
     <div class="pnl-overview">

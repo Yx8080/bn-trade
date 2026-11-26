@@ -9,14 +9,16 @@ import { createApiMiddleware } from './api.js'
 
 test('a self-bound futures client can read its position mode and leverage until disconnected', async t => {
   const localFetch = globalThis.fetch.bind(globalThis)
-  const payload = { environment: 'testnet', apiKey: 'http-fixture-key', apiSecret: 'http-fixture-secret' }
+  const payload = { environment: 'live', apiKey: 'http-fixture-key', apiSecret: 'http-fixture-secret' }
   t.mock.method(globalThis, 'fetch', (url, init) => {
     assert.equal(init.method, 'GET')
     assert.equal(init.headers.get('X-MBX-APIKEY'), payload.apiKey)
     assert.ok(url.searchParams.has('signature'))
     if (url.pathname === '/fapi/v3/account') return Response.json({ assets: [] })
-    if (url.pathname === '/api/v3/account') return url.hostname === 'demo-api.binance.com'
-      ? Response.json({ balances: [], uid: 741 }) : Response.json({ code: -2015 }, { status: 401 })
+    if (url.pathname === '/api/v3/account') {
+      assert.equal(url.hostname, 'api.binance.com')
+      return Response.json({ balances: [], uid: 741 })
+    }
     if (url.pathname === '/fapi/v1/positionSide/dual') return Response.json({ dualSidePosition: true })
     const symbol = url.searchParams.get('symbol')
     assert.equal(symbol, 'BTCUSDT')
@@ -35,12 +37,12 @@ test('a self-bound futures client can read its position mode and leverage until 
     const response = await localFetch(base + 'accounts/bind', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
     assert.equal(response.status, 200)
     const { token, markets } = await response.json()
-    assert.deepEqual(markets, ['futures'])
+    assert.deepEqual(markets, ['spot', 'futures'])
     const headers = { Authorization: 'Bearer ' + token }
     const modePath = base + 'futures/position-mode'
     const mode = await localFetch(modePath, { headers })
-    assert.deepEqual(await mode.json(), { environment: 'testnet', mode: 'hedge' })
-    assert.equal((await localFetch(modePath, { headers: { ...headers, 'X-Trading-Environment': 'live' } })).status, 401)
+    assert.deepEqual(await mode.json(), { environment: 'live', mode: 'hedge' })
+    assert.equal((await localFetch(modePath, { headers: { ...headers, 'X-Trading-Environment': 'testnet' } })).status, 400)
     const path = base + 'futures/leverage?symbol=BTCUSDT'
     const info = await (await localFetch(path, { headers })).json()
     assert.deepEqual([info.symbol, info.symbolMaxLeverage, info.maxLeverage, info.leverage], ['BTCUSDT', 150, 50, 10])
@@ -62,12 +64,12 @@ test('the Node API preserves a submitted order ID across restarts and rotation o
   let orderCount = 0
   t.mock.method(globalThis, 'fetch', (url, options) => {
     if (url.pathname === '/api/v3/account') {
-      assert.equal(url.hostname, 'testnet.binance.vision')
+      assert.equal(url.hostname, 'api.binance.com')
       assert.ok(url.searchParams.has('signature'))
       boundKeys.push(options.headers.get('X-MBX-APIKEY'))
       return Response.json({ balances: [], uid: 97531 })
     }
-    assert.equal(url.href, 'https://testnet.binance.vision/api/v3/order')
+    assert.equal(url.href, 'https://api.binance.com/api/v3/order')
     assert.equal(options.method, 'POST')
     orderCount++
     return Response.json({
@@ -77,7 +79,7 @@ test('the Node API preserves a submitted order ID across restarts and rotation o
   })
   // Open a fresh HTTP listener and SQLite connection for each attempt.
   for (const expected of [201, 409]) {
-    const env = { BINANCE_FUTURES_USERS: JSON.stringify([{
+    const env = { BINANCE_FUTURES_ENV: 'live', NO_PROXY: '*', BINANCE_FUTURES_USERS: JSON.stringify([{
       id: 'local', name: 'Local', token: 'local-test-token', spotApiKey: 'test-key-' + expected, spotApiSecret: 'test-secret-' + expected,
     }]) }
     const api = createApiMiddleware({ env, databaseFile })
@@ -87,7 +89,7 @@ test('the Node API preserves a submitted order ID across restarts and rotation o
       await once(server, 'listening')
       const response = await localFetch('http://127.0.0.1:' + server.address().port + '/api/spot/orders', {
         method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer local-test-token' },
-        body: JSON.stringify({ symbol: 'BTCUSDT', clientOrderId: 'restart-test', environment: 'testnet', quoteOrderQty: '50' }),
+        body: JSON.stringify({ symbol: 'BTCUSDT', clientOrderId: 'restart-test', environment: 'live', quoteOrderQty: '50' }),
       })
       assert.equal(response.status, expected)
       await response.arrayBuffer()

@@ -17,12 +17,10 @@ function setup(t) {
   return sockets
 }
 
-test('market streams route each environment and combine futures feeds on one socket', () => {
-  assert.equal(marketStreamUrl('futures', 'live', 'BTCUSDT'),
+test('market streams use live spot and combine live futures feeds on one socket', () => {
+  assert.equal(marketStreamUrl('futures', 'BTCUSDT'),
     'wss://fstream.binance.com/market/stream?streams=btcusdt@miniTicker/btcusdt@markPrice@1s')
-  assert.match(marketStreamUrl('futures', 'testnet', 'BTCUSDT'), /\/\/fstream\.binancefuture\.com\/market\//)
-  assert.match(marketStreamUrl('spot', 'live', 'ETHUSDT'), /\/\/stream\.binance\.com:443\/ws\/ethusdt@miniTicker$/)
-  assert.match(marketStreamUrl('spot', 'testnet', 'ETHUSDT'), /\/\/stream\.testnet\.binance\.vision\/ws\/ethusdt@miniTicker$/)
+  assert.equal(marketStreamUrl('spot', 'ETHUSDT'), 'wss://stream.binance.com:443/ws/ethusdt@miniTicker')
 })
 
 test('an older HTTP snapshot cannot replace newer stream prices, and updates coalesce', async t => {
@@ -51,10 +49,10 @@ test('an older HTTP snapshot cannot replace newer stream prices, and updates coa
 test('fresh events suppress HTTP polling, a stale stream uses fallback, and cleanup aborts it', async t => {
   const sockets = setup(t)
   const requests = []
-  const stop = subscribeMarketQuote('spot', 'testnet', 'BTCUSDT', signal => {
+  const stop = subscribeMarketQuote('spot', 'live', 'BTCUSDT', signal => {
     requests.push(signal)
     return requests.length > 1 ? new Promise(() => {}) :
-      Promise.resolve({ symbol: 'BTCUSDT', environment: 'testnet', lastPrice: '10', time: Date.now() })
+      Promise.resolve({ symbol: 'BTCUSDT', environment: 'live', lastPrice: '10', time: Date.now() })
   }, () => {}, () => {}, () => {})
   await Promise.resolve()
   t.mock.timers.tick(14_000)
@@ -87,17 +85,17 @@ test('an access or rate error pauses streaming and HTTP until the user refreshes
   stop()
 })
 
-test('switching the same symbol to another environment discards late HTTP responses and queued stream ticks', async t => {
+test('reopening a quote discards late HTTP responses and queued stream ticks', async t => {
   const sockets = setup(t)
   const oldSnapshot = Promise.withResolvers()
   const updates = []
   const snapshot = (environment, price) => ({ symbol: 'BTCUSDT', environment, lastPrice: price, time: timestamp })
   const observe = price => updates.push(price.price)
-  const stopTestnet = subscribeMarketQuote('spot', 'testnet', 'BTCUSDT', () => oldSnapshot.promise, observe, assert.fail, () => {})
+  const stopPrevious = subscribeMarketQuote('spot', 'live', 'BTCUSDT', () => oldSnapshot.promise, observe, assert.fail, () => {})
   sockets[0].emit({ e: '24hrMiniTicker', s: 'BTCUSDT', E: timestamp, c: '9' })
-  stopTestnet()
+  stopPrevious()
   const stopLive = subscribeMarketQuote('spot', 'live', 'BTCUSDT', async () => snapshot('live', '20'), observe, assert.fail, () => {})
-  oldSnapshot.resolve(snapshot('testnet', '10'))
+  oldSnapshot.resolve(snapshot('live', '10'))
   await Promise.resolve()
   t.mock.timers.tick(200)
   stopLive()

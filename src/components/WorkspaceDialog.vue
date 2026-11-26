@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { Close } from '@element-plus/icons-vue'
 
 defineProps<{ title: string }>()
@@ -7,6 +7,7 @@ const emit = defineEmits<{ close: [] }>()
 const dialog = ref<HTMLDialogElement>()
 
 onMounted(() => dialog.value?.showModal())
+onBeforeUnmount(() => dialog.value?.close())
 </script>
 
 <template>

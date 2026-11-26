@@ -4,7 +4,55 @@
   gap: 17px;
   margin-bottom: 22px;
 }
-.position-history { margin-top: 20px; }
+.ledger-tab-header {
+  min-height: 54px;
+  padding-block: 0;
+  border-bottom: 1px solid var(--line);
+}
+.ledger-tab-header .status {
+  white-space: nowrap;
+}
+.ledger-tabs {
+  display: flex;
+  align-self: stretch;
+  gap: clamp(8px, 2vw, 22px);
+}
+.ledger-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  padding: 0 4px;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ledger-tabs button[aria-selected='true'] {
+  border-bottom-color: var(--green);
+  color: var(--green);
+}
+.ledger-tabs button:focus-visible {
+  outline-offset: -3px;
+}
+.ledger-tabs svg {
+  width: 16px;
+  height: 16px;
+}
+@media (max-width: 400px) {
+  .ledger-tab-header {
+    gap: 6px;
+  }
+  .ledger-tabs button {
+    font-size: 14px;
+  }
+  .ledger-tabs svg {
+    display: none;
+  }
+}
 .profit-card {
   isolation: isolate;
   position: relative;

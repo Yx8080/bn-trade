@@ -20,17 +20,17 @@ export function apiErrorResponse(error) {
 }
 
 export function getTradingEnvironment(env) {
-  const value = env.BINANCE_FUTURES_ENV ?? 'testnet'
-  if (value !== 'testnet' && value !== 'live') {
+  if (env.BINANCE_FUTURES_ENV !== undefined && env.BINANCE_FUTURES_ENV !== 'live') {
     throw new ApiError(503, 'INVALID_ENVIRONMENT', '服务端交易环境配置有误。')
   }
-  return value
+  return 'live'
 }
 
-export function quoteEnvironment(searchParams, fallback) {
-  const market = searchParams.get('environment') ?? fallback
-  if (market !== 'live' && market !== 'testnet') throw new ApiError(400, 'INVALID_QUOTE_ENVIRONMENT', '行情环境无效。')
-  return market
+export function checkTradingEnvironment(selected, searchParams) {
+  if (selected != null && selected !== 'live') throw new ApiError(400, 'INVALID_ENVIRONMENT', '交易工作台仅支持实盘。')
+  if (searchParams.getAll('environment').some(value => value !== 'live')) {
+    throw new ApiError(409, 'ENVIRONMENT_CHANGED', '请求与实盘环境不一致，请重新确认。')
+  }
 }
 
 const hasText = value => typeof value === 'string' && value.trim().length > 0
@@ -262,7 +262,7 @@ export async function setFuturesLeverage(env, base, user, symbol, leverage) {
   }
 }
 
-export async function submitFuturesOrder(env, base, user, params, leverage, checkExposure) {
+export async function submitFuturesOrder(env, base, user, params, leverage, preflight) {
   const identity = [getTradingEnvironment(env), user.id, params.symbol]
   const owner = params.newClientOrderId
   const key = JSON.stringify(identity)
@@ -286,8 +286,15 @@ export async function submitFuturesOrder(env, base, user, params, leverage, chec
   if (!acquired) throw busy()
   sendingFuturesOrders.add(key)
   try {
-    if (checkExposure) {
-      try { await checkExposure() } catch (error) { error.definite = true; throw error }
+    if (preflight) {
+      try {
+        const prepared = await preflight()
+        if (prepared) {
+          if (!isPositiveDecimal(prepared.quantity)) throw invalidData()
+          leverage = prepared.leverage
+          params = { ...params, quantity: prepared.quantity }
+        }
+      } catch (error) { error.definite = true; throw error }
       if (Date.now() + 2 * exchangeTimeoutMs >= expiresAt) throw busy()
     }
     if (leverage !== undefined) await setFuturesLeverage(env, base, user, params.symbol, leverage)

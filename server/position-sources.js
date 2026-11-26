@@ -1,4 +1,4 @@
-import { futuresBases, futuresPositions } from '../worker/futures.js'
+import { futuresBase, futuresPositions } from '../worker/futures.js'
 import { units } from '../worker/futures-sizing.js'
 import { ApiError, apiErrorResponse, binanceRequest, getTradingEnvironment, getTradingUser, invalidData, jsonResponse } from '../worker/trading.js'
 import { classifyFuturesFills } from './other-trades.js'
@@ -82,8 +82,8 @@ export function tracePosition(position, fills) {
     manualOnly: complete && active.length === 1 && active[0].source.kind === 'manual' }
 }
 
-async function readTrades(env, user, environment, symbol, params) {
-  const rows = await binanceRequest(env, futuresBases[environment], '/fapi/v1/userTrades', {
+async function readTrades(env, user, symbol, params) {
+  const rows = await binanceRequest(env, futuresBase, '/fapi/v1/userTrades', {
     credentials: user, params: { symbol, limit: 1000, ...params },
   })
   if (!Array.isArray(rows) || rows.length > 1000) throw invalidData()
@@ -106,7 +106,7 @@ async function resolveLegs(env, user, environment, legs, manualAnchor) {
   const symbol = legs[0].symbol
   const updatedAt = Math.max(...legs.map(p => p.updateTime))
   const params = updatedAt > 0 && Date.now() - updatedAt >= 7 * 86_400_000 ? { endTime: updatedAt } : {}
-  const recent = await classifyFuturesFills(env, user, environment, symbol, await readTrades(env, user, environment, symbol, params))
+  const recent = await classifyFuturesFills(env, user, environment, symbol, await readTrades(env, user, symbol, params))
   const results = legs.map(p => tracePosition(p, recent))
   if (results.every(r => r.complete)) return results
 
@@ -118,7 +118,7 @@ async function resolveLegs(env, user, environment, legs, manualAnchor) {
   let cursor = BigInt(first)
   const history = []
   for (let page = 0; page < 3; page++) {
-    const rows = await readTrades(env, user, environment, symbol, { fromId: String(cursor) })
+    const rows = await readTrades(env, user, symbol, { fromId: String(cursor) })
     if (rows.some(row => !/^\d{1,20}$/.test(row?.id) || BigInt(row.id) < cursor)) throw invalidData()
     history.push(...rows)
     if (rows.length < 1000 || (recent.length && rows.some(row => row.id === recent[0].id))) {
@@ -146,7 +146,7 @@ export async function positionSources(request, env) {
     const user = await getTradingUser(request, env)
     if (!user.apiKey || !user.apiSecret) throw new ApiError(503, 'FUTURES_NOT_CONFIGURED', '当前账户尚未配置合约密钥。')
     const environment = getTradingEnvironment(env)
-    const risk = await binanceRequest(env, futuresBases[environment], '/fapi/v3/positionRisk', { credentials: user })
+    const risk = await binanceRequest(env, futuresBase, '/fapi/v3/positionRisk', { credentials: user })
     const positions = futuresPositions(risk).map(({ symbol, positionSide, quantity, entryPrice, updateTime }) =>
       ({ symbol, positionSide, quantity, entryPrice, updateTime, sources: [], complete: false }))
     const symbols = [...new Set(positions.map(p => p.symbol))]

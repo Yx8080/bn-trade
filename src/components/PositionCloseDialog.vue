@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, useId, watch } from 'vue'
-import { closePosition, createClientOrderId, FuturesError, getClosePositionRules, getSelectedEnvironment, lookupOrder,
+import { closePosition, createClientOrderId, FuturesError, getClosePositionRules, lookupOrder,
   type ClosePositionRules, type FuturesSession, type OrderResult, type Position } from '../futures'
 import { closePercentQuantity, closeQuantityIssue, closeQuantityPercent } from '../position-close'
 import { pendingOrderKey, readPending, writePending, type PendingOrder } from './pendingOrder'
@@ -30,7 +30,6 @@ const available = computed(() => props.position?.quantity.replace(/^-/, '') ?? '
 const direction = computed(() => props.position?.quantity.startsWith('-') ? 'SHORT' : 'LONG')
 const sideLabel = computed(() => direction.value === 'LONG' ? '平多' : '平空')
 const quantity = computed(() => whole.value ? available.value : amount.value)
-const envLabel = computed(() => props.session.environment === 'live' ? '实盘' : '测试网')
 const percentInput = computed(() => chosenPercent.value ?? closeQuantityPercent(amount.value, available.value))
 const percentIssue = computed(() => !whole.value && !!chosenPercent.value && !/^(?:[1-9]\d?|100)$/.test(chosenPercent.value))
 const sizeIssue = computed(() => rules.value ? closeQuantityIssue(quantity.value, available.value, rules.value) : '')
@@ -85,7 +84,7 @@ function record(data: OrderResult) {
 }
 async function submit() {
   const row = props.position
-  if (!valid.value || !row || getSelectedEnvironment() !== props.session.environment) return
+  if (!valid.value || !row) return
   const clientOrderId = createClientOrderId()
   const owner = key.value
   const input = { symbol: row.symbol, environment: props.session.environment, clientOrderId,
@@ -116,7 +115,7 @@ async function submit() {
 }
 async function reconcile() {
   const order = pending.value
-  if (!order || checking.value || submitting.value || getSelectedEnvironment() !== props.session.environment) return
+  if (!order || checking.value || submitting.value) return
   const owner = key.value
   checking.value = true
   failure.value = ''
@@ -169,7 +168,7 @@ function clearVerified() {
   <WorkspaceDialog v-if="position && (!pending || submitting)" title="市价平仓" @close="close">
     <div class="close-summary">
       <strong>{{ position.symbol }} · {{ sideLabel }}</strong>
-      <span>{{ session.name }} · {{ envLabel }}</span>
+      <span>{{ session.name }} · 实盘</span>
     </div>
     <div class="available-row"><span>可平仓位</span><strong>{{ available }} {{ rules?.baseAsset }}</strong></div>
     <div class="close-options" role="group" aria-label="平仓方式">
@@ -202,7 +201,7 @@ function clearVerified() {
     <p v-if="failure" class="notice error" role="alert">{{ failure }}</p>
     <div class="dialog-actions">
       <button type="button" class="btn" :disabled="submitting" @click="close">{{ changed ? '返回持仓' : '取消' }}</button>
-      <button type="button" class="btn primary" :disabled="!valid" @click="submit">{{ submitting ? '正在提交…' : '确认' + envLabel + '平仓' }}</button>
+      <button type="button" class="btn primary" :disabled="!valid" @click="submit">{{ submitting ? '正在提交…' : '确认实盘平仓' }}</button>
     </div>
   </WorkspaceDialog>
   <WorkspaceDialog v-if="forget && pending" title="结束平仓订单核实" @close="forget = false">

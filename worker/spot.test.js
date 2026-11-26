@@ -7,7 +7,7 @@ import { createLocalOrderDb } from './local-orders.js'
 const user = { id: 'alice', name: 'Alice', token: 'spot-test-token',
   spotApiKey: 'spot-test-key', spotApiSecret: 'spot-test-secret', apiKey: 'different-futures-key', apiSecret: 'different-futures-secret' }
 const config = { BINANCE_FUTURES_USERS: JSON.stringify([user]) }
-const buy = { symbol: 'ETHUSDT', quoteOrderQty: '25.50', clientOrderId: 'spot-1', environment: 'testnet' }
+const buy = { symbol: 'ETHUSDT', quoteOrderQty: '25.50', clientOrderId: 'spot-1', environment: 'live' }
 
 function send(path, body, env = config) {
   const request = new Request('https://local.test/api/spot/' + path, {
@@ -18,7 +18,7 @@ function send(path, body, env = config) {
 }
 
 function signedParams(url, init) {
-  assert.equal(url.origin, 'https://testnet.binance.vision')
+  assert.equal(url.origin, 'https://api.binance.com')
   assert.equal(init.headers.get('X-MBX-APIKEY'), user.spotApiKey)
   assert.equal(init.headers.has('Authorization'), false)
   const params = new URLSearchParams(init.body ?? url.search)
@@ -49,7 +49,7 @@ test('spot balances include locked funds and are signed with the user’s separa
     return Response.json({ balances: [{ asset: 'BTC', free: '0', locked: '0.125' }, { asset: 'ETH', free: '0', locked: '0' }] })
   })
   const account = await send('account')
-  assert.deepEqual(await account.json(), { name: user.name, environment: 'testnet', balances: [{ asset: 'BTC', free: '0', locked: '0.125' }] })
+  assert.deepEqual(await account.json(), { name: user.name, environment: 'live', balances: [{ asset: 'BTC', free: '0', locked: '0.125' }] })
   const futuresOnly = { ...user, spotApiKey: undefined, spotApiSecret: undefined }
   const unavailable = await send('account', undefined, { BINANCE_FUTURES_USERS: JSON.stringify([futuresOnly]) })
   assert.equal((await unavailable.json()).code, 'SPOT_NOT_CONFIGURED')
@@ -90,7 +90,7 @@ test('spot only accepts an environment-confirmed market buy with an exact positi
   for (const edits of [{ quantity: '2' }, { side: 'SELL' }, { quoteOrderQty: '-1' }, { quoteOrderQty: '0.0' }]) {
     assert.equal((await send('orders', { ...buy, ...edits })).status, 400)
   }
-  assert.equal((await send('orders', { ...buy, environment: 'live' })).status, 409)
+  assert.equal((await send('orders', { ...buy, environment: 'testnet' })).status, 409)
   assert.equal(upstream.mock.callCount(), 0)
 })
 

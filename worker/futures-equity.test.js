@@ -34,7 +34,7 @@ test('equity uses the whole account margin balance; multi-assets USD equity is c
 test('manual sizing computes margin from fresh equity and rounds the confirmed quantity down to the relevant lot step', async () => {
   for (const [mode, type, qty] of [['margin', 'LIMIT', '1.234'], ['equityPercent', 'MARKET', '2.46']]) {
     const calls = []
-    const resp = await read('order-size?' + new URLSearchParams({ environment: 'testnet', symbol: 'ETHUSDT', type,
+    const resp = await read('order-size?' + new URLSearchParams({ environment: 'live', symbol: 'ETHUSDT', type,
       price: '100', mode, amount: mode === 'margin' ? '12.349' : '2', leverage: '10' }), url => {
       calls.push(url.pathname)
       if (url.pathname === '/fapi/v2/account') return Response.json({ totalMarginBalance:'1234.9', multiAssetsMargin:false,
@@ -53,7 +53,7 @@ test('manual sizing computes margin from fresh equity and rounds the confirmed q
 
 test('manual sizing checks USDT available to open and excludes the matching one-way closing portion', async () => {
   async function preview(amount, available, side, positionSide = 'BOTH') {
-    const query = new URLSearchParams({ environment: 'testnet', symbol: 'ETHUSDT', type: 'LIMIT', price: '100',
+    const query = new URLSearchParams({ environment: 'live', symbol: 'ETHUSDT', type: 'LIMIT', price: '100',
       mode: 'margin', leverage: '10', amount, side, positionSide })
     return read('order-size?' + query, url => {
       if (url.pathname === '/fapi/v2/account') return Response.json({ positions: [

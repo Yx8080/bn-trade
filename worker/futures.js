@@ -1,16 +1,16 @@
 import {
   ApiError, apiErrorResponse, binanceRequest, getTradingEnvironment, getTradingUser, isClientOrderId,
   invalidData, isDecimal, isPositiveDecimal, jsonResponse, orderLookup,
-  quoteEnvironment, readOrderJson, requireSymbol, submitFuturesOrder,
+  checkTradingEnvironment, readOrderJson, requireSymbol, submitFuturesOrder,
 } from './trading.js'
 import { isAppLeverage } from '../shared/leverage.js'
-import { symbolLeverageInfo } from './futures-leverage.js'
+import { publicSymbolLeverage, symbolLeverageInfo } from './futures-leverage.js'
 import { lookupPlatformOrder, submitPlatformOrder } from './platform-orders.js'
 import { fundedOpeningNotional, getFuturesEquity } from './futures-equity.js'
 import { decimal, scale, sizeMarketOrder, symbolRules, units } from './futures-sizing.js'
 import { closePosition, requireFuturesSymbol } from './futures-close.js'
 
-export const futuresBases = { testnet: 'https://demo-fapi.binance.com', live: 'https://fapi.binance.com' }
+export const futuresBase = 'https://fapi.binance.com'
 const positionSides = ['BOTH', 'LONG', 'SHORT']
 const orderFields = new Set(['environment', 'symbol', 'side', 'positionSide', 'type', 'quantity', 'price', 'reduceOnly', 'leverage', 'clientOrderId'])
 
@@ -121,21 +121,26 @@ function orderParams(input, environment) {
 async function route(request, env) {
   const { pathname, searchParams } = new URL(request.url)
   const environment = getTradingEnvironment(env)
-  const base = futuresBases[environment]
+  checkTradingEnvironment(request.headers.get('X-Trading-Environment'), searchParams)
+  const base = futuresBase
   const methods = {
     '/api/futures/quote': ['GET'], '/api/futures/session': ['GET'],
     '/api/futures/account': ['GET'], '/api/futures/equity': ['GET'],
     '/api/futures/position-mode': ['GET'], '/api/futures/order-size': ['GET'],
     '/api/futures/close-position': ['GET', 'POST'],
-    '/api/futures/leverage': ['GET'], '/api/futures/orders': ['GET', 'POST'],
+    '/api/futures/leverage': ['GET'], '/api/futures/leverage-limit': ['GET'],
+    '/api/futures/orders': ['GET', 'POST'],
   }[pathname]
   if (!methods) throw new ApiError(404, 'NOT_FOUND', '接口不存在。')
   if (!methods.includes(request.method)) {
     return jsonResponse({ code: 'METHOD_NOT_ALLOWED', message: '请求方法无效。' }, 405, { Allow: methods.join(', ') })
   }
   if (pathname === '/api/futures/quote') {
-    const market = quoteEnvironment(searchParams, environment)
-    return jsonResponse(await quote(env, futuresBases[market], searchParams, market))
+    return jsonResponse(await quote(env, base, searchParams, environment))
+  }
+  if (pathname === '/api/futures/leverage-limit') {
+    const symbol = requireSymbol(searchParams.get('symbol'))
+    return jsonResponse(await publicSymbolLeverage(env, base, symbol, environment))
   }
   const user = await getTradingUser(request, env)
   if (pathname === '/api/futures/session') {

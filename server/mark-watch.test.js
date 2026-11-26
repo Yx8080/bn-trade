@@ -18,7 +18,7 @@ test('one mark socket tracks only held symbols and coalesces durable risk thresh
   const calls = []
   const socket = fakeSocket()
   const connect = t.mock.fn(async url => { assert.equal(url, 'wss://fstream.binance.com/market/stream'); return socket })
-  const watch = createMarkWatch('live', connect, id => calls.push(id))
+  const watch = createMarkWatch(connect, id => calls.push(id))
   const other = { ...position, userId: 'bob', direction: 'SHORT' }
   watch.update([position, other])
   await Promise.resolve()
@@ -58,7 +58,7 @@ test('disconnects back off, while removal of all holdings cancels reconnect and 
   t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now })
   const sockets = []
   const connect = t.mock.fn(async () => { const socket = fakeSocket(); sockets.push(socket); return socket })
-  const watch = createMarkWatch('testnet', connect, () => assert.fail())
+  const watch = createMarkWatch(connect, () => assert.fail())
   watch.update([position])
   await Promise.resolve()
   sockets[0].onclose()

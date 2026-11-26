@@ -13,7 +13,7 @@ const user = { id: 'trader', name: 'test', token: 'test-token', apiKey: 'f-key',
   spotApiKey: 's-key', spotApiSecret: 's-secret' }
 const request = (market, input, query = '') => new Request('http://localhost/api/' + market + '/orders' + query, {
   headers: { 'Authorization': 'Bearer test-token', 'Content-Type': 'application/json' },
-  method: input ? 'POST' : 'GET', body: input ? JSON.stringify({ environment: 'testnet', symbol: 'BTCUSDT', ...input }) : undefined,
+  method: input ? 'POST' : 'GET', body: input ? JSON.stringify({ environment: 'live', symbol: 'BTCUSDT', ...input }) : undefined,
 })
 
 async function setup(t, fetchBinance) {
@@ -33,7 +33,7 @@ async function setup(t, fetchBinance) {
   return {
     env, async restart() { await service.close(); db.close(); start() },
     async tick(ms = 16_000) { t.mock.timers.tick(ms); await service.poll() },
-    report: () => db.platform.report('testnet', user.id, 1),
+    report: () => db.platform.report('live', user.id, 1),
   }
 }
 
@@ -89,10 +89,10 @@ test('platform futures journal recovers an unknown order, records each partial o
   assert.deepEqual(report.rows.map(r => [r.status,r.quantity,r.quote,r.settled]), [['FILLED',3,300,true]])
   assert.deepEqual(report.totals.map(r => [r.asset,r.realized,r.fees]), [['BNB',0,0.001],['USDT',8,0.1]])
   const store = h.env.orderStore.platform
-  assert.equal(store.futuresFills('testnet', user.id).length, 2)
-  assert.equal(store.report('live', user.id).total, 0)
-  assert.equal(store.report('testnet', user.id, 1, { futures: 'different' }).total, 0)
-  assert.deepEqual([...store.orderIds('testnet', user.id, ledgerIdentity(user.id, user.apiKey), 'futures', 'BTCUSDT', [venueId,'999'])], [venueId])
+  assert.equal(store.futuresFills('live', user.id).length, 2)
+  assert.equal(store.report('testnet', user.id).total, 0)
+  assert.equal(store.report('live', user.id, 1, { futures: 'different' }).total, 0)
+  assert.deepEqual([...store.orderIds('live', user.id, ledgerIdentity(user.id, user.apiKey), 'futures', 'BTCUSDT', [venueId,'999'])], [venueId])
 })
 
 test('spot records only platform buy cost, net inventory and per-asset fees; definite rejections never become trades', async t => {
@@ -123,24 +123,24 @@ test('unconfirmed intents reject reused client IDs and mismatched legs; a correc
   const h = await setup(t, () => { throw Error('unexpected request') })
   const local = h.env.orderStore
   const db = local.platform
-  local.reserve('testnet', 'futures', user.id, 'intent', {
+  local.reserve('live', 'futures', user.id, 'intent', {
     apiKey: user.apiKey, symbol: 'BTCUSDT', side: 'BUY', positionSide: 'LONG', type: 'LIMIT',
   })
   const receipt = { symbol: 'BTCUSDT', clientOrderId: 'intent', orderId: '400', side: 'BUY', type: 'LIMIT',
     executedQty: '1', status: 'FILLED' }
-  const observe = (venueTime, leg) => db.acknowledge('testnet', user.id, 'futures', user.apiKey, receipt, venueTime, true, leg)
+  const observe = (venueTime, leg) => db.acknowledge('live', user.id, 'futures', user.apiKey, receipt, venueTime, true, leg)
   assert.equal(observe(epoch + 3_600_000, 'LONG'), false)
   assert.equal(observe(epoch - 3_600_000, 'LONG'), false)
   assert.equal(observe(epoch + 1, 'SHORT'), false)
   assert.equal(observe(epoch + 1, 'LONG'), true)
-  const [row] = db.due('testnet', epoch)
+  const [row] = db.due('live', epoch)
   db.saveFills(row, [{ id: '7', time: epoch, quantity: 1, quote: 100, price: 100, realized: 0, realizedAsset: 'USDT',
     fee: 0, feeAsset: 'USDT' }], epoch)
   assert.equal(h.report().pendingCount, 0)
   receipt.executedQty = '2'
   assert.equal(observe(epoch + 1, 'LONG'), true)
   assert.equal(h.report().pendingCount, 1)
-  assert.equal(db.due('testnet', epoch)[0].executedQty, '2')
+  assert.equal(db.due('live', epoch)[0].executedQty, '2')
 })
 
 test('a short inconsistent trade page is rescanned so a late lower trade ID is settled without double counting', async t => {

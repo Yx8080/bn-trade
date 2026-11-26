@@ -28,8 +28,8 @@ test('跟单状态只读，启动与暂停带上当前环境和账户令牌', as
       config: null, positions: [], events: [], lastCheck: null, error: '', pending: null })
   })
   const config = { portfolioIds: ['123', '456'], leverage: 10, sizingMode: 'equityPercent', repeat: 'fixed', manualPositionPolicy: 'add', amount: 2, maxEntries: 2, maxPositions: 2, stopLoss: 5 }
-  const start = { action: 'start', environment: 'testnet', config }
-  const pause = { action: 'pause', environment: 'testnet' }
+  const start = { action: 'start', environment: 'live', config }
+  const pause = { action: 'pause', environment: 'live' }
   await getCopyStatus('mock-token')
   assert.equal((await updateCopyStatus('mock-token', start)).enabled, true)
   assert.equal((await updateCopyStatus('mock-token', pause)).enabled, false)
@@ -38,7 +38,7 @@ test('跟单状态只读，启动与暂停带上当前环境和账户令牌', as
 
 test('跟单回执丢失时提示核对状态，不向服务端重复提交', async t => {
   const fetch = t.mock.method(globalThis, 'fetch', () => new Response('Bad Gateway', { status: 502 }))
-  await assert.rejects(updateCopyStatus('mock-token', { action: 'pause', environment: 'testnet' }), { code: 'COPY_UNKNOWN' })
+  await assert.rejects(updateCopyStatus('mock-token', { action: 'pause', environment: 'live' }), { code: 'COPY_UNKNOWN' })
   assert.equal(fetch.mock.callCount(), 1)
 })
 

@@ -1,10 +1,12 @@
 import { ApiError, binanceRequest, getTradingEnvironment, getTradingUserById, invalidData, isDecimal, orderResult } from '../worker/trading.js'
 import { ledgerIdentity, terminalOrder } from './platform-store.js'
 import { units } from '../worker/futures-sizing.js'
+import { futuresBase } from '../worker/futures.js'
+import { spotBase } from '../worker/spot.js'
 
 const endpoints = {
-  spot: { live: 'https://api.binance.com', testnet: 'https://testnet.binance.vision', order: '/api/v3/order', trades: '/api/v3/myTrades' },
-  futures: { live: 'https://fapi.binance.com', testnet: 'https://demo-fapi.binance.com', order: '/fapi/v1/order', trades: '/fapi/v1/userTrades' },
+  spot: { base: spotBase, order: '/api/v3/order', trades: '/api/v3/myTrades' },
+  futures: { base: futuresBase, order: '/fapi/v1/order', trades: '/fapi/v1/userTrades' },
 }
 
 function number(value, positive = false) {
@@ -41,7 +43,7 @@ async function reconcile(env, db, row) {
     return
   }
   const paths = endpoints[row.market]
-  const base = paths[row.environment]
+  const base = paths.base
   if (!terminalOrder(row.status)) {
     const params = row.orderId ? { symbol: row.symbol, orderId: row.orderId } : { symbol: row.symbol, origClientOrderId: row.clientOrderId }
     const data = await binanceRequest(env, base, paths.order, { credentials, params })

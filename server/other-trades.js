@@ -1,5 +1,5 @@
-import { futuresBases, futuresPositions } from '../worker/futures.js'
-import { spotBalances, spotBases } from '../worker/spot.js'
+import { futuresBase, futuresPositions } from '../worker/futures.js'
+import { spotBalances, spotBase } from '../worker/spot.js'
 import { ApiError, binanceRequest, invalidData, isDecimal, isPositiveDecimal } from '../worker/trading.js'
 import { ledgerIdentity } from './platform-store.js'
 
@@ -27,7 +27,7 @@ function marketAccess(env, user, environment, market, symbol) {
   const credentials = spot ? { apiKey: user.spotApiKey, apiSecret: user.spotApiSecret } : user
   if (!credentials.apiKey || !credentials.apiSecret) throw new ApiError(503,
     spot ? 'SPOT_NOT_CONFIGURED' : 'FUTURES_NOT_CONFIGURED', '当前账户尚未配置此市场的交易所密钥。')
-  const base = (spot ? spotBases : futuresBases)[environment]
+  const base = spot ? spotBase : futuresBase
   return { db: env.orderStore, environment, market, symbol, spot, userId: user.id, key: ledgerIdentity(user.id, credentials.apiKey),
     signed: (path, params) => binanceRequest(env, base, path, { credentials, params }) }
 }

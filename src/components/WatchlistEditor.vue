@@ -5,7 +5,7 @@ import { parsePortfolioId } from '../trades'
 import type { LeadPortfolio } from '../portfolios'
 import WorkspaceDialog from './WorkspaceDialog.vue'
 
-const props = defineProps<{ portfolios: LeadPortfolio[]; adding?: boolean }>()
+const props = defineProps<{ portfolios: LeadPortfolio[]; adding?: boolean; saving?: boolean; saveError?: string }>()
 const emit = defineEmits<{ close: []; save: [entries: LeadPortfolio[]] }>()
 let nextId = 0
 function makeRow(id = '', name = '') {
@@ -53,9 +53,9 @@ function save() {
 <template>
   <WorkspaceDialog title="管理带单组合" @close="emit('close')">
     <p class="dialog-description">
-      可按行批量粘贴组合 ID 或币安带单链接。组合列表保存在此浏览器的当前工作区。
+      可按行批量粘贴组合 ID 或币安带单链接。保存后，服务会在后台持续监控这些组合。
     </p>
-    <form @submit.prevent="save">
+    <form :aria-busy="saving" @submit.prevent="save">
       <div class="edit-rows">
         <div v-for="(row, i) in rows" :key="row.key" class="edit-row">
           <label class="field">
@@ -91,10 +91,10 @@ function save() {
         <Plus />
         添加组合
       </button>
-      <p v-if="error" class="notice error" role="alert">{{ error }}</p>
+      <p v-if="error || saveError" class="notice error" role="alert">{{ error || saveError }}</p>
       <div class="dialog-actions">
         <button type="button" class="btn" @click="emit('close')">取消</button>
-        <button class="btn primary" type="submit">保存组合</button>
+        <button class="btn primary" type="submit" :disabled="saving">{{ saving ? '正在保存…' : '保存组合' }}</button>
       </div>
     </form>
   </WorkspaceDialog>

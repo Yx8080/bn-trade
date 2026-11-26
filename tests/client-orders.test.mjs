@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buySpot, getFuturesPositionMode, lookupSpotOrder, selectEnvironment, submitOrder } from '../src/futures.ts'
+import { buySpot, getFuturesPositionMode, lookupSpotOrder, submitOrder } from '../src/futures.ts'
 import { estimateOpeningMargin, manualOpeningDirection } from '../src/manual-opening.ts'
 import { amountFromBalance, availableUsdt } from '../src/opening-funds.ts'
 
@@ -41,25 +41,22 @@ test('手动开多和开空按账户模式指定方向，均不发送仅减仓�
 })
 
 test('手动合约只采用当前环境明确返回的持仓模式', async t => {
-  selectEnvironment('testnet')
-  t.after(() => selectEnvironment('testnet'))
-  let reply = { environment: 'testnet', mode: 'hedge' }
+  let reply = { environment: 'live', mode: 'hedge' }
   t.mock.method(globalThis, 'fetch', async (path, init) => {
     assert.equal(path, '/api/futures/position-mode')
-    assert.equal(init.headers.get('X-Trading-Environment'), 'testnet')
+    assert.equal(init.headers.get('X-Trading-Environment'), 'live')
     assert.equal(init.headers.get('Authorization'), 'Bearer test-token')
     return Response.json(reply)
   })
-  const read = () => getFuturesPositionMode('test-token', 'testnet')
+  const read = () => getFuturesPositionMode('test-token', 'live')
   assert.equal(await read(), 'hedge')
-  reply = { environment: 'testnet', mode: null }
+  reply = { environment: 'live', mode: null }
   await assert.rejects(read(), /持仓模式无效/)
-  reply = { environment: 'live', mode: 'oneWay' }
-  await assert.rejects(read(), { code: 'ENVIRONMENT_CHANGED' })
   reply = { environment: 'testnet', mode: 'oneWay' }
-  const beforeSwitch = read()
-  selectEnvironment('live')
-  await assert.rejects(beforeSwitch, { code: 'ENVIRONMENT_CHANGED' })
+  await assert.rejects(read(), { code: 'ENVIRONMENT_CHANGED' })
+  reply = { environment: 'live', mode: 'oneWay' }
+  assert.equal(await read(), 'oneWay')
+  await assert.rejects(getFuturesPositionMode('test-token', 'testnet'), { code: 'ENVIRONMENT_CHANGED' })
 })
 
 test('手动开仓以 USDT 保证金衡量固定金额和合约数量', () => {
@@ -80,7 +77,7 @@ test('仅将同一交易对的反向单向持仓抵扣开仓保证金', () => {
 })
 
 test('丢失回执后保留原订单号，只发起查询', async t => {
-  const order = { environment: 'testnet', symbol: 'BTCUSDT', quoteOrderQty: '10.00', clientOrderId: 'existing-id' }
+  const order = { environment: 'live', symbol: 'BTCUSDT', quoteOrderQty: '10.00', clientOrderId: 'existing-id' }
   const calls = []
   t.mock.method(globalThis, 'fetch', async (path, init) => {
     calls.push({ path, method: init.method })
@@ -102,7 +99,7 @@ test('丢失回执后保留原订单号，只发起查询', async t => {
 })
 
 test('杠杆设置未获确认时保留服务端拒单原因', async t => {
-  const order = { environment: 'testnet', symbol: 'BTCUSDT', leverage: 10, side: 'BUY',
+  const order = { environment: 'live', symbol: 'BTCUSDT', leverage: 10, side: 'BUY',
     positionSide: 'BOTH', type: 'MARKET', quantity: '0.001', clientOrderId: 'with-leverage' }
   t.mock.method(globalThis, 'fetch', async (path, init) => {
     assert.equal(path, '/api/futures/orders')

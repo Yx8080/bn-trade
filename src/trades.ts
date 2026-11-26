@@ -167,18 +167,27 @@ export async function fetchObservedTrades(query: TradeQuery, cursor?: string, si
   return { list: data.list.map(normalizeTrade), total: data.total, cursor: data.cursor ?? undefined }
 }
 
-export async function observePortfolios(viewId: string, portfolioIds: string[], signal: AbortSignal) {
-  const data = await monitorRequest<{ portfolios: ObservationStatus[] }>('/api/monitor/observe', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewId, portfolioIds }),
-  }, signal)
+export async function fetchObservationStatus(portfolioIds: string[], signal: AbortSignal) {
+  const params = new URLSearchParams(portfolioIds.map(id => ['portfolioId', id]))
+  const data = await monitorRequest<{ portfolios: ObservationStatus[] }>(`/api/monitor/status?${params}`, {}, signal)
   if (!Array.isArray(data?.portfolios)) throw Error('服务未能确认监控状态。')
   return data.portfolios
 }
 
-export function releaseObservation(viewId: string) {
-  void fetch('/api/monitor/release', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ viewId }), keepalive: true,
-  }).catch(() => { /* An unreachable view expires automatically when its lease ends. */ })
+export async function saveMonitoredPortfolios(portfolioIds: string[], token?: string) {
+  const headers = new Headers({ 'Content-Type': 'application/json' })
+  if (token) headers.set('Authorization', 'Bearer ' + token)
+  await monitorRequest('/api/monitor/watchlist', { method: 'PUT', headers, body: JSON.stringify({ portfolioIds }) })
+}
+
+export async function fetchMonitoredPortfolios(token: string, signal: AbortSignal) {
+  const headers = token ? { Authorization: 'Bearer ' + token } : undefined
+  const data = await monitorRequest<{ portfolioIds: string[] | null }>('/api/monitor/watchlist', { headers }, signal)
+  if (data?.portfolioIds === null) return null
+  if (!Array.isArray(data?.portfolioIds) || data.portfolioIds.some(id => typeof id !== 'string' || !/^\d{1,30}$/.test(id))) {
+    throw Error('服务返回的监控组合列表无效。')
+  }
+  return data.portfolioIds
 }
 
 export interface ClosedPosition {
