@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import timers from 'node:timers/promises'
 import { createCopyExchange } from './copy-exchange.js'
 import { runCopyTick } from './copy-engine.js'
 
@@ -24,69 +23,30 @@ function exchange(fetchBinance, lease = {}) {
   return createCopyExchange({ fetchBinance, orderStore }, user, 'live')
 }
 
-const row = { symbol: 'BTCUSDT', side: 'SELL', positionSide: 'SHORT', type: 'MARKET', orderTime: 999900,
-  orderUpdateTime: 1000200, executedQty: 1, avgPrice: 50000, totalPnl: 0 }
-
-test('signals filter the expanded source window, sort actionable fills and keep a stable identity across updates', async () => {
-  let trades = [row, { ...row, side: 'BUY', orderUpdateTime: 1000100 }, { ...row, orderUpdateTime: 1000000 },
-    { ...row, orderUpdateTime: 1100000 }, { ...row, executedQty: 0 }, { ...row, positionSide: 'BOTH' }]
-  const client = exchange((url, options) => {
-    assert.equal(url.pathname.endsWith('/lead-portfolio/order-history'), true)
-    assert.equal(JSON.parse(options.body).startTime, 700300)
-    assert.equal(options.headers.has('X-MBX-APIKEY'), false)
-    return Response.json({ code: '000000', data: { total: trades.length, list: trades } })
-  })
-  const signals = await client.signals(id, 1000000, 1000300)
-  assert.deepEqual(signals.map(({ direction, kind, time }) => [direction, kind, time]), [
-    ['SHORT', 'close', 1000100], ['SHORT', 'open', 1000200],
-  ])
-  trades = [{ ...row, executedQty: 2, avgPrice: 49000, orderUpdateTime: 1000250 }]
-  assert.equal((await client.signals(id, 1000000, 1000300))[0].id, signals[1].id)
-})
-
-test('truncated history defers the whole batch and rate limits preserve the exchange wait', async () => {
-  const incomplete = exchange(() => Response.json({ code: '000000', data: { total: 2, list: [row], indexValue: '-1' } }))
-  await assert.rejects(incomplete.signals(id, 1000000, 1000300), { code: 'INCOMPLETE_COPY_SIGNALS' })
-  const limited = exchange(() => new Response('', { status: 429, headers: { 'Retry-After': '45' } }))
-  await assert.rejects(limited.signals(id, 1000000, 1000300), { status: 429, headers: { 'Retry-After': '45' } })
-})
-
-test('signal pagination preserves the query bounds and tolerates a repeated cursor boundary fill', async t => {
-  const delay = t.mock.method(timers, 'setTimeout', async () => {})
-  const newer = { ...row, orderTime: 1000101, orderUpdateTime: 1000103, avgPrice: 1e-7 }
-  const older = { ...row, orderTime: 1000001, orderUpdateTime: 1000002 }
-  const client = exchange((_url, options) => {
-    const body = JSON.parse(options.body)
-    assert.equal(body.startTime, 700300)
-    assert.equal(body.endTime, 1000300)
-    return Response.json({ code: '000000', data: { total: 2, indexValue: '1000103',
-      list: body.indexValue === '1000103' ? [newer, older] : [newer] } })
-  })
-  const signals = await client.signals(id, 1000000, 1000300)
-  assert.deepEqual(signals.map(signal => signal.time), [1000002, 1000103])
-  assert.equal(delay.mock.callCount(), 1)
-})
-
 test('positions confirms actual account mode and preserves the signed direction', async () => {
   let hedging = true
   let positionCalls = 0
+  const short = { symbol: 'BTCUSDT', positionAmt: '-0.01', entryPrice: '60001.5', markPrice: '60101.5',
+    unRealizedProfit: '-1', updateTime: 1800000000000 }
   const client = exchange((url, options) => {
     assert.equal(options.headers.get('X-MBX-APIKEY'), user.apiKey)
     assert.ok(url.searchParams.has('signature'))
     if (url.pathname.endsWith('/dual')) return Response.json({ dualSidePosition: hedging })
     assert.equal(url.pathname, '/fapi/v3/positionRisk')
     positionCalls++
-    return Response.json([{ symbol: 'BTCUSDT', positionSide: 'BOTH', positionAmt: '-0.01',
-      entryPrice: '60001.5', markPrice: '60101.5', unRealizedProfit: '-1', updateTime: 1800000000000 },
-    { symbol: 'ETHUSDT', positionSide: 'BOTH', positionAmt: '0' }])
+    return Response.json(hedging
+      ? [{ ...short, positionSide: 'SHORT' }, { ...short, positionSide: 'LONG', positionAmt: '0.02' }]
+      : [{ ...short, positionSide: 'BOTH' }, { symbol: 'ETHUSDT', positionSide: 'BOTH', positionAmt: '0' }])
   })
-  await assert.rejects(client.positions(), { code: 'COPY_ONE_WAY_REQUIRED' })
-  assert.equal(positionCalls, 0)
+  const hedged = await client.positions()
+  assert.equal(hedged.mode, 'hedge')
+  assert.deepEqual(hedged.positions.map(p => [p.positionSide, p.direction, p.quantity]), [['SHORT', 'SHORT', 0.01], ['LONG', 'LONG', 0.02]])
   hedging = false
-  assert.deepEqual(await client.positions(), [
+  assert.deepEqual(await client.positions(), { mode: 'oneWay', positions: [
     { symbol: 'BTCUSDT', direction: 'SHORT', quantity: 0.01, entryPrice: 60001.5, markPrice: 60101.5,
-      unrealizedPnl: -1, quantityText: '-0.01', entryPriceText: '60001.5', updateTime: 1800000000000 },
-  ])
+      unrealizedPnl: -1, quantityText: '-0.01', entryPriceText: '60001.5', updateTime: 1800000000000, positionSide: 'BOTH' },
+  ] })
+  assert.equal(positionCalls, 2)
 })
 
 function orderMock(onOrder) {
@@ -109,7 +69,8 @@ function orderMock(onOrder) {
 
 function receipt(params) {
   const data = { symbol: 'BTCUSDT', orderId: 'RAW_INT64', clientOrderId: params.get('newClientOrderId') ?? params.get('origClientOrderId'),
-    type: 'MARKET', side: params.get('side') ?? 'BUY', status: 'FILLED', executedQty: params.get('quantity') ?? '1', avgPrice: '11' }
+    type: 'MARKET', side: params.get('side') ?? 'BUY', positionSide: params.get('positionSide'),
+    status: 'FILLED', executedQty: params.get('quantity') ?? '1', avgPrice: '11' }
   return new Response(JSON.stringify(data).replace('"RAW_INT64"', exchangeId))
 }
 
@@ -235,9 +196,87 @@ test('first opens require a one-way, verifiably flat response for the exact requ
   await assert.rejects(open('now-short'), { code: 'COPY_POSITION_NOT_FLAT', definite: true })
   risk = []
   mode = true
-  await assert.rejects(open('hedge-mode'), { code: 'COPY_ONE_WAY_REQUIRED', definite: true })
+  await assert.rejects(open('changed-mode'), { code: 'COPY_POSITION_MODE_CHANGED', definite: true })
   mode = 'false'
   await assert.rejects(open('unknown-mode'), { code: 'INVALID_UPSTREAM_DATA', definite: true })
+  assert.equal(writes, 2)
+})
+
+test('hedge mode tracks both sides of one symbol independently, including exits and stop loss', async () => {
+  const now = 1_800_000_001_000
+  const state = { enabled: true, config: { portfolioIds: [id], amount: 11, repeat: 'first',
+    maxEntries: 1, maxPositions: 1, stopLoss: 5 }, since: now - 1000, positions: [], events: [], pending: null }
+  const live = new Map()
+  const orders = []
+  const signals = []
+  const mock = orderMock(params => {
+    const positionSide = params.get('positionSide')
+    const side = params.get('side')
+    assert.equal(params.has('reduceOnly'), false)
+    orders.push([positionSide, side, params.get('quantity')])
+    if ((positionSide === 'LONG') === (side === 'BUY')) {
+      live.set(positionSide, { symbol: 'BTCUSDT', positionSide, positionAmt: side === 'BUY' ? '1' : '-1',
+        entryPrice: '11', markPrice: '11', unRealizedProfit: '0', updateTime: now + orders.length })
+    } else {
+      assert.ok(live.delete(positionSide))
+    }
+    return receipt(params)
+  })
+  const client = exchange((url, init) => {
+    if (url.pathname.endsWith('/dual')) return Response.json({ dualSidePosition: true })
+    if (url.pathname.endsWith('/positionRisk')) return Response.json([...live.values()])
+    return mock(url, init)
+  })
+  client.signals = async () => signals
+  function signal(id, offset, kind, direction, symbol = 'BTCUSDT') {
+    signals.push({ id, symbol, direction, kind, time: now + offset })
+  }
+  signal('short-close-while-flat', -4, 'close', 'SHORT')
+  signal('open-long', -4, 'open', 'LONG')
+  signal('open-short', -3, 'open', 'SHORT')
+  signal('over-symbol-cap', -2, 'open', 'LONG', 'ETHUSDT')
+  await runCopyTick(state, client, () => {}, now)
+  assert.deepEqual(state.positions.map(p => [p.positionSide, p.quantity]), [['LONG', 1], ['SHORT', 1]])
+  assert.deepEqual(orders, [['LONG', 'BUY', '1'], ['SHORT', 'SELL', '1']])
+
+  signal('lead-closes-long', 10, 'close', 'LONG')
+  await runCopyTick(state, client, () => {}, now + 20)
+  assert.deepEqual(state.positions.map(p => p.positionSide), ['SHORT'])
+  assert.deepEqual([...live.keys()], ['SHORT'])
+  assert.deepEqual(orders.at(-1), ['LONG', 'SELL', '1'])
+
+  live.get('SHORT').unRealizedProfit = '-6'
+  await runCopyTick(state, client, () => {}, now + 30)
+  assert.deepEqual(state.positions, [])
+  assert.deepEqual(orders.at(-1), ['SHORT', 'BUY', '1'])
+  assert.equal(orders.length, 4)
+})
+
+test('hedge-mode shared exits validate the latest fill on that side and reject a wrong-leg receipt', async () => {
+  const actual = { quantityText: '-0.13', entryPriceText: '100', updateTime: 1800000000000 }
+  const short = { symbol: 'BTCUSDT', positionSide: 'SHORT', positionAmt: actual.quantityText,
+    entryPrice: actual.entryPriceText, updateTime: actual.updateTime }
+  const long = { ...short, positionSide: 'LONG', positionAmt: '0.2' }
+  const fills = [{ symbol: 'BTCUSDT', positionSide: 'LONG', id: '103', orderId: '88' },
+    { symbol: 'BTCUSDT', positionSide: 'SHORT', id: '102', orderId: exchangeId }]
+  let writes = 0
+  const mock = orderMock(params => {
+    writes++
+    assert.deepEqual([params.get('positionSide'), params.get('side'), params.get('quantity'), params.get('reduceOnly')],
+      ['SHORT', 'BUY', '0.03', null])
+    if (writes === 2) params.set('positionSide', 'LONG')
+    return receipt(params)
+  })
+  const client = exchange((url, init) => {
+    if (url.pathname === '/fapi/v3/positionRisk') return Response.json([short, long])
+    if (url.pathname === '/fapi/v1/userTrades') return Response.json(fills)
+    return mock(url, init)
+  })
+  const close = key => client.close('BTCUSDT', 'SHORT', 0.03, key, { positionSide: 'SHORT', actual, lastOrderId: exchangeId })
+  assert.equal((await close('different-long-fill')).positionSide, 'SHORT')
+  await assert.rejects(close('wrong-leg-receipt'), error => error.code === 'ORDER_UNKNOWN' && !error.definite)
+  fills.push({ symbol: 'BTCUSDT', positionSide: 'SHORT', id: '104', orderId: '99' })
+  await assert.rejects(close('different-short-fill'), { code: 'SHARED_POSITION_CHANGED', definite: true })
   assert.equal(writes, 2)
 })
 

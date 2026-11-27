@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ArrowDown, Refresh, Tickets } from '@element-plus/icons-vue'
+import { ArrowDown, CircleCheck, Refresh, Tickets } from '@element-plus/icons-vue'
 import { COPY_LEVERAGE_TIERS, isAppLeverage, isCopyLeverageOverrides } from '../../shared/leverage.js'
 import { getCopyEquity, getCopyStatus, updateCopyStatus, type BoundSession, type CopyConfig, type CopyStatus } from '../futures'
 import type { OpeningFunds } from '../opening-funds'
@@ -27,11 +27,13 @@ const actionError = ref('')
 const busy = ref(false)
 const checking = ref(false)
 const preview = ref<CopyConfig | null>(null)
+const eventsOpen = ref(false)
 const advancedSettings = ref<HTMLDetailsElement | null>(null)
 const equity = ref<Awaited<ReturnType<typeof getCopyEquity>> | null>(null)
 const equityLoading = ref(false)
 const equityError = ref('')
 const locked = computed(() => Boolean(status.value?.enabled || status.value?.pending || status.value?.positions.length))
+const managedConfig = computed(() => locked.value ? status.value?.config : null)
 const synchronized = computed(() => Boolean(status.value && !statusError.value))
 const fixed = computed(() => draft.value.repeat === 'fixed')
 const config = computed<CopyConfig>(() => ({ ...draft.value, maxEntries: fixed.value ? draft.value.maxEntries : 1 }))
@@ -41,12 +43,13 @@ const portfolios = computed(() => {
 })
 const estimate = computed(() => sizeEstimate(draft.value))
 const previewEstimate = computed(() => preview.value ? sizeEstimate(preview.value) : null)
-const previewTierSummary = computed(() => {
-  const overrides = preview.value?.leverage
+function leverageTierSummary(overrides: CopyConfig['leverage'] | undefined) {
   if (!overrides || typeof overrides !== 'object') return ''
   return COPY_LEVERAGE_TIERS.filter(tier => overrides[tier] !== undefined)
     .map(tier => '最高 ' + tier + '× 用 ' + overrides[tier] + '×').join(' · ')
-})
+}
+const previewTierSummary = computed(() => leverageTierSummary(preview.value?.leverage))
+const managedTierSummary = computed(() => leverageTierSummary(managedConfig.value?.leverage))
 const percentMode = computed(() => draft.value.sizingMode === 'equityPercent')
 const legacyMode = computed(() => draft.value.sizingMode === 'notional' || status.value?.config?.sizingMode === 'notional')
 const amountInput = computed({
@@ -62,7 +65,7 @@ const stateLabel = computed(() => {
   if (!props.session) return '访客预览'
   if (!synchronized.value) return statusError.value ? '状态待核实' : '正在读取'
   if (status.value?.enabled) return '跟单中'
-  if (locked.value) return '已暂停开仓'
+  if (locked.value) return '已暂停新开仓'
   return status.value?.config ? '已暂停' : '未启动'
 })
 let controller: AbortController | undefined
@@ -253,7 +256,87 @@ async function submit(action: 'start' | 'pause') {
 
 <template>
   <div>
-    <div class="futures-form-panel">
+    <section v-if="session" class="copy-status" aria-label="执行状态">
+      <div class="copy-state" :class="{ 'is-running': synchronized && status?.enabled }">
+        <div class="copy-state-main">
+          <h3 class="copy-state-title" aria-live="polite">
+            <CircleCheck v-if="synchronized && status?.enabled" aria-hidden="true" />
+            {{ stateLabel }}
+          </h3>
+          <p class="copy-state-meta">
+            <span>{{ session.name }}</span>
+            <time v-if="status?.lastCheck" :datetime="new Date(status.lastCheck).toISOString()">
+              最近检查 {{ formatTradeTime(status.lastCheck) }} UTC+8
+            </time>
+          </p>
+        </div>
+        <div class="copy-state-actions">
+          <button v-if="status?.enabled" type="button" class="btn small" :disabled="busy || !synchronized" @click="submit('pause')">
+            {{ busy ? '处理中…' : '暂停新开仓' }}
+          </button>
+          <button v-else-if="locked" type="button" class="btn small primary" :disabled="busy || !synchronized || !!fundingIssue" @click="prepare">
+            {{ busy ? '处理中…' : '恢复跟单' }}
+          </button>
+          <button type="button" class="btn small" aria-haspopup="dialog" :disabled="!status" @click="eventsOpen = true">
+            <Tickets aria-hidden="true" />执行记录
+          </button>
+          <button type="button" class="icon-button" title="刷新执行状态" aria-label="刷新执行状态"
+            :disabled="checking || busy" @click="refresh"><Refresh aria-hidden="true" /></button>
+        </div>
+      </div>
+      <p v-if="statusError || status?.error" class="notice warning" role="status">{{ statusError || status?.error }}</p>
+      <p v-if="status?.pending" class="notice warning" role="status">
+        订单待核实 · {{ portfolioName(status.pending.portfolioId) }} · {{ status.pending.symbol }} · {{ status.pending.clientOrderId }}
+      </p>
+      <p v-if="locked && actionError" class="notice error" role="alert">{{ actionError }}</p>
+      <template v-if="locked && !status?.enabled">
+        <p class="ticket-hint">已有跟单仓位继续处理止损和跟随平仓，仓位和订单结清后可修改设置。</p>
+        <p v-if="fundingIssue" class="notice warning" role="status">
+          {{ fundingIssue }} <button type="button" class="text-button" @click="refreshFunds">刷新余额</button>
+        </p>
+      </template>
+      <div v-if="managedConfig" class="copy-managed">
+        <h3>策略设置</h3>
+        <p class="copy-managed-leaders">
+          <span>跟单对象</span><strong>{{ managedConfig.portfolioIds.map(portfolioName).join('、') }}</strong>
+        </p>
+        <dl class="copy-overview">
+          <div><dt>跟单方式</dt><dd>{{ managedConfig.sizingMode === 'equityPercent' ? '定比跟单' : managedConfig.sizingMode === 'margin' ? '定额跟单' : '原策略合约价值' }}</dd></div>
+          <div>
+            <dt>{{ managedConfig.sizingMode === 'equityPercent' ? '每笔占总权益' : managedConfig.sizingMode === 'margin' ? '每笔保证金' : '每笔合约价值' }}</dt>
+            <dd>{{ formatNumber(managedConfig.amount) }}{{ managedConfig.sizingMode === 'equityPercent' ? '%' : ' USDT' }}</dd>
+          </div>
+          <div><dt>单仓止损</dt><dd>{{ formatNumber(managedConfig.stopLoss) }} USDT</dd></div>
+          <div>
+            <dt>杠杆 · 持仓上限</dt>
+            <dd>{{ managedConfig.leverage === 'max' ? '最高档' : typeof managedConfig.leverage === 'number' ? managedConfig.leverage + ' 倍' :
+              managedConfig.leverage ? '自定义档位' : '沿用当前杠杆' }} · {{ managedConfig.maxPositions }} 仓</dd>
+          </div>
+        </dl>
+        <details class="copy-policy">
+          <summary>高级设置 <ArrowDown aria-hidden="true" /></summary>
+          <dl class="copy-overview">
+            <div><dt>已有仓位时</dt><dd>{{ managedConfig.manualPositionPolicy === 'add' ? '自动加仓' : '跳过' }}</dd></div>
+            <div><dt>跟单开仓方式</dt><dd>{{ managedConfig.repeat === 'fixed' ? '自动加仓 · 最多 ' + managedConfig.maxEntries + ' 次' : '首笔' }}</dd></div>
+            <div v-if="managedTierSummary" class="copy-tiers"><dt>自定义杠杆</dt><dd>{{ managedTierSummary }}</dd></div>
+          </dl>
+        </details>
+      </div>
+      <div v-if="locked && status" class="copy-positions">
+        <h3>跟单持仓 <span>{{ positionCount }}</span></h3>
+        <div v-if="positionCount" class="table-scroll">
+          <table><thead><tr><th>交易对 / 方向</th><th>带单组合</th><th class="numeric">数量</th><th class="numeric">开仓均价</th><th class="numeric">开仓次数</th></tr></thead>
+            <tbody><tr v-for="row in status.positions" :key="row.symbol + '/' + row.direction">
+              <td>{{ row.symbol }} · {{ row.direction === 'LONG' ? '多' : '空' }}</td>
+              <td>{{ portfolioName(row.portfolioId) }}</td>
+              <td class="numeric">{{ formatNumber(row.quantity) }}</td><td class="numeric">{{ formatNumber(row.entryPrice) }}</td><td class="numeric">{{ row.entries }}</td>
+            </tr></tbody>
+          </table>
+        </div>
+        <p v-else class="ticket-hint">暂无跟单持仓。</p>
+      </div>
+    </section>
+    <div v-if="!locked && (!session || status || statusError)" class="futures-form-panel">
       <form aria-label="跟单设置" class="ticket-form" @submit.prevent="prepare">
         <fieldset class="copy-mode-group" :disabled="locked || busy" aria-label="跟单方式">
           <div class="copy-modes">
@@ -355,47 +438,21 @@ async function submit(action: 'start' | 'pause') {
             </fieldset>
           </div>
         </details>
-        <p v-if="locked" class="ticket-hint">{{ status?.enabled ? '策略运行中。暂停开仓后，待跟单仓位和待核实订单全部结清即可更改设置。' : '仓位或订单仍在管理中。可按原设置恢复跟单，结清后可修改参数。' }}</p>
         <p v-if="actionError" class="notice error" role="alert">{{ actionError }}</p>
-        <button v-if="status?.enabled" type="button" class="btn" :disabled="busy || !synchronized" @click="submit('pause')">
-          {{ busy ? '处理中…' : '暂停新开仓' }}
-        </button>
-        <button v-else type="submit" class="btn primary" :disabled="busy || !validMoney(draft.amount) || !draft.portfolioIds.length || !!fundingIssue || (!!session && !synchronized)">
+        <button type="submit" class="btn primary" :disabled="busy || !validMoney(draft.amount) || !draft.portfolioIds.length || !!fundingIssue || (!!session && !synchronized)">
           {{ busy ? '处理中…' : '预览跟单设置' }}
         </button>
-        <p v-if="status?.enabled || locked" class="ticket-hint">暂停后，服务端继续处理已有跟单仓位的止损和跟随平仓。</p>
       </form>
     </div>
-    <section class="copy-status">
-      <div class="ledger-heading">
-        <div class="section-title"><Tickets /><h2>执行状态</h2></div>
-        <button v-if="session" class="btn small" :disabled="checking || busy" @click="refresh"><Refresh />刷新</button>
-      </div>
-      <div class="copy-status-body">
-        <div class="copy-state"><strong>{{ stateLabel }}</strong><span>{{ session ? session.name + ' · 实盘' : '连接账户后可启动跟单' }}</span></div>
-        <p v-if="statusError || status?.error" class="notice warning" role="status">{{ statusError || status?.error }}</p>
-        <template v-if="status">
-          <p v-if="status.pending" class="notice warning" role="status">订单待核实 · {{ portfolioName(status.pending.portfolioId) }} · {{ status.pending.symbol }} · {{ status.pending.clientOrderId }}</p>
-          <p v-if="status.lastCheck" class="ticket-hint">服务端最近检查 {{ formatTradeTime(status.lastCheck) }} UTC+8</p>
-          <h3>跟单持仓 <span>{{ positionCount }}</span></h3>
-          <div v-if="positionCount" class="table-scroll">
-            <table><thead><tr><th>交易对 / 方向</th><th>带单组合</th><th class="numeric">数量</th><th class="numeric">开仓均价</th><th class="numeric">开仓次数</th></tr></thead>
-              <tbody><tr v-for="row in status.positions" :key="row.symbol">
-                <td>{{ row.symbol }} · {{ row.direction === 'LONG' ? '多' : '空' }}</td>
-                <td>{{ portfolioName(row.portfolioId) }}</td>
-                <td class="numeric">{{ formatNumber(row.quantity) }}</td><td class="numeric">{{ formatNumber(row.entryPrice) }}</td><td class="numeric">{{ row.entries }}</td>
-              </tr></tbody>
-            </table>
-          </div>
-          <p v-else class="ticket-hint">暂无跟单持仓。</p>
-          <h3>执行记录</h3>
-          <ul v-if="status.events.length" class="copy-events">
-            <li v-for="(event, i) in status.events" :key="i"><time>{{ formatTradeTime(event.time) }}</time> {{ event.message }}</li>
-          </ul>
-          <p v-else class="ticket-hint">暂无执行记录。</p>
-        </template>
-      </div>
-    </section>
+    <WorkspaceDialog v-if="eventsOpen" title="执行记录" @close="eventsOpen = false">
+      <ul v-if="status?.events.length" class="copy-events" tabindex="0" aria-label="跟单执行记录">
+        <li v-for="(event, i) in status.events" :key="i">
+          <time :datetime="new Date(event.time).toISOString()">{{ formatTradeTime(event.time) }}</time>
+          <span>{{ event.message }}</span>
+        </li>
+      </ul>
+      <p v-else class="ticket-hint">暂无执行记录。</p>
+    </WorkspaceDialog>
     <WorkspaceDialog v-if="preview" :title="session ? '确认启动实盘跟单' : '跟单设置预览'" @close="preview = null">
       <dl class="order-review">
         <div><dt>执行账户</dt><dd>实盘 · {{ session ? 'UID ' + session.uid : '尚未连接' }}</dd></div>
@@ -513,15 +570,90 @@ async function submit(action: 'start' | 'pause') {
 .review-id { display: block; color: var(--muted); font-size: 11px; }
 .copy-fields { display: grid; gap: 13px; min-width: 0; border: 0; padding: 0; margin: 0; }
 .copy-fields .field small { color: var(--muted); font-size: 12px; line-height: 1.55; font-weight: 400; }
-.copy-status { min-width: 0; border-top: 1px solid var(--line); }
-.copy-status-body { display: grid; gap: 10px; padding: 0 20px 20px; }
-.copy-state { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; padding: 14px; background: #eff5ef; border-radius: 8px; }
-.copy-state span, .copy-events time { font-size: 12px; color: var(--muted); }
-.copy-status h3 { margin: 8px 0 0; font-size: 14px; }
-.copy-status h3 span { margin-left: 5px; color: var(--muted); }
-.copy-events { list-style: none; padding: 0; margin: 0; max-height: 320px; overflow: auto; }
-.copy-events li { padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; overflow-wrap: anywhere; }
-.copy-events time { display: block; margin-bottom: 3px; }
-.copy-status table { min-width: 360px; }
-@media (max-width: 480px) { .copy-status-body { padding-inline: 14px; } }
+.copy-status { display: grid; min-width: 0; gap: 12px; padding: 0 var(--order-gutter, 21px) 20px; }
+.copy-status > .notice { margin: 0; }
+.copy-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #f2f5f2;
+}
+.copy-state.is-running { background: #edf5ee; }
+.copy-state-main { min-width: 0; }
+.copy-status h3 { margin: 0; font-size: 14px; }
+.copy-state .copy-state-title { display: flex; align-items: center; gap: 6px; font-size: 16px; }
+.copy-state-title svg { width: 16px; height: 16px; color: var(--green); }
+.copy-state-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.copy-state-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.copy-state-actions .btn { padding-inline: 9px; }
+.copy-state-actions .btn svg { width: 14px; height: 14px; }
+.copy-managed { container-type: inline-size; display: grid; gap: 8px; padding-top: 3px; }
+.copy-managed-leaders { display: flex; flex-wrap: wrap; gap: 2px 8px; font-size: 12px; overflow-wrap: anywhere; }
+.copy-managed-leaders span, .copy-overview dt { color: var(--muted); }
+.copy-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px 9px;
+}
+.copy-overview dt { font-size: 12px; }
+.copy-overview dd { margin-top: 3px; font-size: 13px; font-weight: 630; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.copy-policy summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  padding: 4px 0;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.copy-policy summary::-webkit-details-marker { display: none; }
+.copy-policy summary svg { width: 13px; height: 13px; }
+.copy-policy[open] summary svg { transform: rotate(180deg); }
+.copy-policy .copy-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 5px; }
+.copy-tiers { grid-column: 1 / -1; }
+.copy-positions { display: grid; gap: 5px; padding-top: 11px; border-top: 1px solid var(--line); }
+.copy-positions h3 span { margin-left: 3px; color: var(--muted); }
+.copy-positions table { min-width: 360px; }
+.copy-events {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: min(55dvh, 28rem);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.copy-events li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 3px 12px;
+  padding: 9px 4px 9px 0;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.copy-events time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+@container (max-width: 430px) {
+  .copy-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 480px) {
+  .copy-events li { grid-template-columns: minmax(0, 1fr); }
+}
 </style>

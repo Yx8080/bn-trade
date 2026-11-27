@@ -7,6 +7,7 @@ import { createBinanceTransport } from './binance-transport.js'
 import { createCopyService } from './copy-service.js'
 import { platformPnl } from './platform-pnl.js'
 import { positionSources } from './position-sources.js'
+import { futuresPositionHistory } from './futures-position-history.js'
 import { createPlatformSettlement } from './platform-settlement.js'
 import { accountBinding } from './account-binding.js'
 import { createConfiguredVerifier } from './configured-accounts.js'
@@ -38,8 +39,8 @@ export function createApiMiddleware({ env, databaseFile }) {
     get orderStore() { return getDatabase() },
   }
   context.verifyConfiguredUser = createConfiguredVerifier(context, 'live')
-  const monitor = createMonitorApi(context)
   const copy = createCopyService(context)
+  const monitor = createMonitorApi(context, copy.notifyPortfolio)
   const settlement = createPlatformSettlement(context)
   const handlers = new Map([
     ['/api/monitor/status', monitor.handle], ['/api/monitor/watchlist', monitor.handle],
@@ -49,6 +50,7 @@ export function createApiMiddleware({ env, databaseFile }) {
     ['/api/futures/copy', copy.fetch], ['/api/futures/copy-pnl', copy.fetch],
     ['/api/futures/other-trades', copy.fetch],
     ['/api/futures/position-sources', positionSources],
+    ['/api/futures/position-history', futuresPositionHistory],
     ['/api/platform/pnl', platformPnl], ['/api/platform/valuation', platformPnl],
   ])
 

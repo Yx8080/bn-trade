@@ -51,13 +51,14 @@ export async function getFuturesPositionMode(env, base, user) {
 export function futuresPositions(risk) {
   if (!Array.isArray(risk)) throw invalidData()
   return risk.flatMap(({ symbol, positionSide, positionAmt: quantity, entryPrice, markPrice,
-    unRealizedProfit: unrealizedPnl, updateTime, marginAsset }) => {
+    unRealizedProfit: unrealizedPnl, positionInitialMargin, updateTime, marginAsset }) => {
     if (!isDecimal(quantity)) throw invalidData()
     if (Number(quantity) === 0) return []
     if (typeof symbol !== 'string' || !symbol || !positionSides.includes(positionSide)
       || ![entryPrice, markPrice, unrealizedPnl].every(isDecimal)
       || !Number.isSafeInteger(updateTime) || typeof marginAsset !== 'string' || !marginAsset) throw invalidData()
-    return [{ symbol, positionSide, quantity, entryPrice, markPrice, unrealizedPnl, updateTime, marginAsset }]
+    return [{ symbol, positionSide, quantity, entryPrice, markPrice, unrealizedPnl, updateTime, marginAsset,
+      ...(isPositiveDecimal(positionInitialMargin) && { positionInitialMargin }) }]
   })
 }
 

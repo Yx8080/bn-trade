@@ -2,9 +2,10 @@
 import { computed, ref, shallowRef, watch } from 'vue'
 import { Lock, Refresh, Wallet } from '@element-plus/icons-vue'
 import { getPositionSources, type getSpotAccount, type FuturesAccount, type FuturesSession, type Position, type PositionAttribution } from '../futures'
+import { formatReturnRate, marginReturn } from '../pnl'
 import type { LeadPortfolio } from '../portfolios'
-import { formatNumber, formatTradeTime } from '../trades'
-import FuturesFillHistory from './FuturesFillHistory.vue'
+import { formatAmount, formatNumber, formatTradeTime } from '../trades'
+import FuturesPositionHistory from './FuturesPositionHistory.vue'
 import PositionCloseDialog from './PositionCloseDialog.vue'
 import TradeSource from './TradeSource.vue'
 
@@ -12,7 +13,6 @@ const props = defineProps<{
   market: 'spot' | 'futures'
   session: FuturesSession | null
   token: string
-  symbol: string
   entries: LeadPortfolio[]
   account?: FuturesAccount
   spotAccount?: Awaited<ReturnType<typeof getSpotAccount>>
@@ -21,16 +21,14 @@ const props = defineProps<{
   fetchedAt: number
 }>()
 const emit = defineEmits<{ connect: []; refresh: [] }>()
-const tab = ref<'positions' | 'balances' | 'fills'>(props.market === 'futures' ? 'positions' : 'balances')
+const tab = ref<'positions' | 'balances' | 'history'>(props.market === 'futures' ? 'positions' : 'balances')
 const selectedPosition = shallowRef<Position | null>(null)
 watch([() => props.session, () => props.token, () => props.market], () => { selectedPosition.value = null }, { flush: 'sync' })
-const historySymbol = ref(props.symbol)
 const historyRevision = ref(0)
 const proof = ref<PositionAttribution[]>([])
 const sourceError = ref('')
 const sourceLoading = ref(false)
 const sourceRetry = ref(0)
-watch(() => props.symbol, symbol => { historySymbol.value = symbol })
 watch([tab, () => props.account, () => props.session, () => props.token, sourceRetry], async ([active, account, session, token], _, cleanup) => {
   proof.value = []
   sourceError.value = ''
@@ -56,13 +54,10 @@ const positions = computed(() => {
     const origin = byLeg.get(position.symbol + ':' + position.positionSide)
     const matches = origin?.quantity === position.quantity && origin.entryPrice === position.entryPrice
       && origin.updateTime === position.updateTime
-    return { ...position, origin: matches ? origin : undefined }
+    const roi = marginReturn(Number(position.unrealizedPnl), Number(position.positionInitialMargin))
+    return { ...position, roi, origin: matches ? origin : undefined }
   })
 })
-function showFills(symbol: string) {
-  historySymbol.value = symbol
-  tab.value = 'fills'
-}
 function directionLabel(position: Position) {
   return position.positionSide === 'LONG' || (position.positionSide === 'BOTH' && Number(position.quantity) > 0) ? '多仓' : '空仓'
 }
@@ -95,9 +90,10 @@ function refresh() {
           当前持仓
         </button>
         <button type="button" :class="{ active: tab === 'balances' }" :aria-pressed="tab === 'balances'" @click="tab = 'balances'">账户余额</button>
-        <button type="button" :class="{ active: tab === 'fills' }" :aria-pressed="tab === 'fills'" @click="tab = 'fills'">成交记录</button>
+        <button type="button" :class="{ active: tab === 'history' }" :aria-pressed="tab === 'history'" @click="tab = 'history'">仓位历史</button>
       </div>
-      <FuturesFillHistory v-if="market === 'futures' && tab === 'fills'" v-model:symbol="historySymbol" :entries="entries" :token="token" :revision="historyRevision" />
+      <FuturesPositionHistory v-if="market === 'futures' && tab === 'history'" :environment="session.environment"
+        :token="token" :revision="historyRevision" />
       <p v-else-if="error" class="notice error" role="alert">{{ error }}</p>
       <div v-else-if="tab === 'positions'" class="table-scroll" tabindex="0" aria-label="当前合约持仓">
         <table>
@@ -110,6 +106,7 @@ function refresh() {
               <th class="numeric">开仓均价</th>
               <th class="numeric">标记价格</th>
               <th class="numeric">未实现盈亏</th>
+              <th class="numeric" title="未实现盈亏 ÷ 仓位初始保证金">收益率</th>
               <th scope="col" class="position-action">操作</th>
             </tr>
           </thead>
@@ -118,10 +115,7 @@ function refresh() {
               v-for="position in positions"
               :key="position.symbol + position.positionSide"
             >
-              <td>
-                <strong>{{ position.symbol }}</strong>
-                <button class="text-button view-fills" type="button" :aria-label="'查看 ' + position.symbol + ' 成交'" @click="showFills(position.symbol)">查看成交</button>
-              </td>
+              <td><strong>{{ position.symbol }}</strong></td>
               <td>
                 <span v-if="sourceLoading" class="source-loading">正在核对…</span>
                 <TradeSource v-else :sources="position.origin?.sources ?? []" :complete="position.origin?.complete ?? false" :entries="entries" />
@@ -137,8 +131,12 @@ function refresh() {
                   loss: Number(position.unrealizedPnl) < 0,
                 }"
               >
-                {{ formatNumber(Number(position.unrealizedPnl)) }}
+                {{ formatAmount(Number(position.unrealizedPnl)) }}
                 <small>{{ position.marginAsset }}</small>
+              </td>
+              <td class="numeric pnl-cell" :class="{ gain: (position.roi ?? 0) > 0, loss: (position.roi ?? 0) < 0 }"
+                :title="position.roi === null ? '暂未取得仓位初始保证金' : undefined">
+                {{ formatReturnRate(position.roi) }}
               </td>
               <td class="position-action">
                 <button type="button" class="btn small" :aria-label="'平仓 ' + position.symbol + ' ' + directionLabel(position)"
@@ -189,7 +187,7 @@ function refresh() {
           {{ loading ? '正在读取余额…' : '暂无资产余额' }}
         </p>
       </div>
-      <div v-if="tab !== 'fills' && fetchedAt" class="ledger-footer">
+      <div v-if="tab !== 'history' && fetchedAt" class="ledger-footer">
         最近读取 {{ formatTradeTime(fetchedAt) }} UTC+8
       </div>
       <PositionCloseDialog v-if="market === 'futures'" :key="session.environment + ':' + session.id"
@@ -199,7 +197,6 @@ function refresh() {
 </template>
 
 <style scoped>
-.view-fills { display: block; margin-top: 3px; font-size: 12px; }
 .source-loading { font-size: 12px; color: var(--muted); }
 .position-action { text-align: right; }
 @media (max-width: 760px) {

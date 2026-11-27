@@ -49,14 +49,14 @@ export function tracePosition(position, fills) {
     const after = exposure + delta
     if (delta > 0n) {
       let kind = fillKinds[fill.source] ?? 'unknown'
-      const verifiedCopyOpen = kind === 'copy' && position.positionSide === 'BOTH' && fill.portfolioId &&
+      const verifiedCopyOpen = kind === 'copy' && fill.portfolioId &&
         fill.copyKind === 'open' && fill.copyDirection === direction
       if (kind === 'copy' && (!fill.portfolioId || (fill.copyKind && !verifiedCopyOpen))) kind = 'unknown'
       add(kind, kind === 'copy' ? fill.portfolioId : null, delta, verifiedCopyOpen)
       if (anchored) basis += (Number(fill.price) - basis) * (Number(delta) / Number(after))
     } else {
       // Only a journaled close can target a portfolio's verified copy quantity.
-      const copyLot = position.positionSide === 'BOTH' && fill.source === 'copy' && fill.portfolioId && fill.copyKind === 'close' &&
+      const copyLot = fill.source === 'copy' && fill.portfolioId && fill.copyKind === 'close' &&
         fill.copyDirection === direction ? lots.get('copy/' + fill.portfolioId) : null
       const targeted = copyLot && copyLot.copyMin >= -delta
       for (const lot of lots.values()) {
@@ -134,7 +134,7 @@ async function resolveLegs(env, user, environment, legs, manualAnchor) {
 export async function isPlatformManualPosition(env, user, environment, actual) {
   if (!actual || !['LONG', 'SHORT'].includes(actual.direction) || !(actual.quantity > 0) || !(actual.updateTime > 0)) return false
   const amount = String(actual.quantityText ?? actual.quantity).replace(/^-/, '')
-  const position = { symbol: actual.symbol, positionSide: 'BOTH', quantity: actual.direction === 'SHORT' ? '-' + amount : amount,
+  const position = { symbol: actual.symbol, positionSide: actual.positionSide ?? 'BOTH', quantity: actual.direction === 'SHORT' ? '-' + amount : amount,
     entryPrice: actual.entryPriceText ?? actual.entryPrice, updateTime: actual.updateTime }
   const [result] = await resolveLegs(env, user, environment, [position], manualAnchorReader(env, user, environment))
   return result.manualOnly

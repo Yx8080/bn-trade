@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { getOtherTrades, type OtherTrades } from '../futures'
-import { formatNumber, formatTradeTime } from '../trades'
+import { formatAmount, formatFee, formatNumber, formatTradeTime } from '../trades'
 
 const props = defineProps<{ token: string; revision: number }>()
 const market = ref<'futures' | 'spot'>('futures')
@@ -71,7 +71,7 @@ watch([() => props.token, market, symbol, () => props.revision, retry], async ([
             <td>{{ row.symbol }}</td><td>{{ row.positionSide === 'SHORT' || Number(row.quantity) < 0 ? '空' : '多' }}</td>
             <td class="numeric">{{ formatNumber(Math.abs(Number(row.quantity))) }}</td>
             <td class="numeric">{{ formatNumber(Number(row.entryPrice)) }}</td><td class="numeric">{{ formatNumber(Number(row.markPrice)) }}</td>
-            <td class="numeric">{{ formatNumber(Number(row.unrealizedPnl)) }} {{ row.marginAsset }}</td>
+            <td class="numeric">{{ formatAmount(Number(row.unrealizedPnl)) }} {{ row.marginAsset }}</td>
           </tr></tbody>
         </table></div>
         <p v-else class="exchange-note">当前合约账户无持仓。</p>
@@ -97,8 +97,8 @@ watch([() => props.token, market, symbol, () => props.revision, retry], async ([
           <td>{{ row.source === 'unverified' ? '归属待核实' : '交易所直接成交' }}</td>
           <td>{{ row.side === 'BUY' ? '买入' : '卖出' }}{{ row.positionSide === 'LONG' ? ' · 多' : row.positionSide === 'SHORT' ? ' · 空' : '' }}</td>
           <td class="numeric">{{ formatNumber(Number(row.quantity)) }}</td><td class="numeric">{{ formatNumber(Number(row.price)) }}</td>
-          <td v-if="market === 'futures'" class="numeric">{{ row.realizedPnl == null ? '—' : formatNumber(Number(row.realizedPnl)) + ' ' + (row.marginAsset ?? '') }}</td>
-          <td class="numeric">{{ formatNumber(Number(row.commission)) }} {{ row.commissionAsset }}</td>
+          <td v-if="market === 'futures'" class="numeric">{{ row.realizedPnl == null ? '—' : formatAmount(Number(row.realizedPnl)) + ' ' + (row.marginAsset ?? '') }}</td>
+          <td class="numeric">{{ formatFee(Number(row.commission)) }} {{ row.commissionAsset }}</td>
         </tr></tbody>
       </table></div>
       <p v-else class="exchange-note">该交易对近期无交易所直接成交。</p>

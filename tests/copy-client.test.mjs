@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { getCopyPnl, getCopyStatus, getFuturesFills, getOtherTrades, getPlatformPnl, getPlatformValuation, getPositionSources, updateCopyStatus } from '../src/futures.ts'
+import { getCopyPnl, getCopyStatus, getFuturesPositionHistory, getOtherTrades, getPlatformPnl, getPlatformValuation, getPositionSources, updateCopyStatus } from '../src/futures.ts'
 
 test('跟单盈亏按页和当前账户读取，保留不同结算币种与待结算状态', async t => {
   const page = {
@@ -56,7 +56,7 @@ test('平台手动账本、估值和交易所查询可独立读取，切换市�
   assert.deepEqual(urls, ['/api/platform/pnl?page=3', '/api/platform/valuation', '/api/futures/other-trades?market=spot&symbol=ETHBTC'])
 })
 
-test('合约账户的来源、全部成交和仅其他成交分别按当前账户请求', async t => {
+test('合约账户按当前会话读取来源、全账户仓位历史和指定交易对的其他成交', async t => {
   const calls = []
   t.mock.method(globalThis, 'fetch', async (url, init) => {
     assert.equal(init.method, 'GET')
@@ -65,8 +65,8 @@ test('合约账户的来源、全部成交和仅其他成交分别按当前账�
     return Response.json({})
   })
   await getPositionSources('demo-token')
-  await getFuturesFills('demo-token', 'ETHUSDT')
+  await getFuturesPositionHistory('demo-token', 'live')
   await getOtherTrades('demo-token', 'futures', 'ETHUSDT')
-  assert.deepEqual(calls, ['/api/futures/position-sources', '/api/futures/other-trades?market=futures&symbol=ETHUSDT&scope=all',
+  assert.deepEqual(calls, ['/api/futures/position-sources', '/api/futures/position-history',
     '/api/futures/other-trades?market=futures&symbol=ETHUSDT'])
 })

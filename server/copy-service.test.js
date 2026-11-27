@@ -7,6 +7,7 @@ import { setImmediate as flush } from 'node:timers/promises'
 import test from 'node:test'
 import { createLocalOrderDb } from '../worker/local-orders.js'
 import { createCopyService } from './copy-service.js'
+import { createMonitorApi } from './monitor-api.js'
 
 const epoch = 1_800_000_000_000
 const config = { portfolioId: '101', amount: 50, repeat: 'first', maxEntries: 1, maxPositions: 1, stopLoss: 20 }
@@ -49,7 +50,7 @@ function venue() {
     return {
       async positions() {
         observed.push([scope, 'positions'])
-        return structuredClone(at(scope, []))
+        return { mode: 'oneWay', positions: structuredClone(at(scope, [])) }
       },
       async signals(portfolioId, from, until) {
         observed.push([scope, 'signals'])
@@ -84,15 +85,20 @@ async function harness(t) {
     const db = createLocalOrderDb(file)
     const env = { BINANCE_FUTURES_USERS: configured ? JSON.stringify(configured) : undefined, BINANCE_FUTURES_ENV: environment, orderStore: db, openMarkStream }
     const service = createCopyService(env, factory)
-    started.push({ db, service })
-    return { db: db.copy, accounts: db.accounts, service }
+    const instance = { db: db.copy, accounts: db.accounts, service, env }
+    started.push(instance)
+    return instance
   }
   async function tick(ms = 5000) {
     t.mock.timers.tick(ms)
     await flush()
   }
   t.after(async () => {
-    for (const { db, service } of started) { await service.close(); db.close() }
+    for (const { env, service, monitor } of started) {
+      await monitor?.close()
+      await service.close()
+      env.orderStore.close()
+    }
     assert.equal(dirname(resolve(directory)), resolve(tmpdir()))
     assert(basename(directory).startsWith('bn-copy-store-'))
     await rm(directory, { recursive: true, force: true })
@@ -103,6 +109,90 @@ async function harness(t) {
 const begin = { action: 'start', environment: 'live', config }
 const pause = { action: 'pause', environment: 'live' }
 const fillSignal = (time, kind) => ({ time: epoch + time, id: String(time), symbol: 'BTCUSDT', direction: 'LONG', kind })
+
+test('one monitor notifies every matching strategy only after a complete sample, including exits after pausing', async t => {
+  const { launch, tick, market } = await harness(t)
+  const accountExchange = (...args) => {
+    const exchange = market.factory(...args)
+    delete exchange.signals
+    return exchange
+  }
+  const first = launch(accountExchange, 'live', undefined, null)
+  const second = launch(accountExchange, 'live', undefined, null)
+  const connect = (instance, index) => instance.accounts.bind('live', { uid: String(index + 100), issuer: 'live',
+    apiKey: users[index].apiKey, apiSecret: users[index].apiSecret, markets: ['futures'] })
+  const a = connect(first, 0)
+  const b = connect(second, 1)
+  first.env.orderStore.monitorWatchlists.save(undefined, ['101'])
+  const calls = []
+  const opened = { symbol: 'BTCUSDT', side: 'BUY', positionSide: 'LONG', orderTime: epoch + 2_000,
+    orderUpdateTime: epoch + 2_001, orderId: JSON.rawJSON('9007199254740993'), avgPrice: 1e-7, executedQty: 1 }
+  const ignored = { ...opened, orderId: JSON.rawJSON('9007199254740992'), status: 'PARTIALLY_FILLED' }
+  let reply = () => ({ list: [], total: 0 })
+  let monitorBusy = false
+  for (const instance of [first, second]) {
+    instance.env.fetchBinance = (url, request) => {
+      assert.match(url.pathname, /lead-portfolio\/order-history$/)
+      assert.equal(request.headers.has('X-MBX-APIKEY'), false)
+      const query = JSON.parse(request.body)
+      calls.push(query)
+      if (monitorBusy) return Response.json({ code: '11012005', message: 'The system is currently busy.' })
+      return Response.json({ code: '000000', data: reply(query) })
+    }
+    instance.monitor = createMonitorApi(instance.env, instance.service.notifyPortfolio)
+  }
+  await json(first.service, 'copy', a.token, begin)
+  await json(second.service, 'copy', b.token, begin)
+  await tick(1_000)
+  assert.equal(calls.length, 1)
+  reply = ({ indexValue }) => indexValue ? { list: [opened, ignored], total: 2, indexValue: 'page2' }
+    : { list: [opened], total: 2, indexValue: 'page2' }
+  await tick()
+  assert.deepEqual(market.orders, [])
+  await tick()
+  assert.deepEqual(market.orders.map(({ scope, kind }) => [scope, kind]), [['live/' + a.id, 'open']])
+  await tick(4_000)
+  assert.deepEqual(calls.map(({ portfolioId }) => portfolioId), ['101', '101', '101'])
+  assert.equal(calls[1].endTime, calls[2].endTime)
+  assert.deepEqual(market.orders.map(({ scope, kind }) => [scope, kind]), [[`live/${a.id}`, 'open'], [`live/${b.id}`, 'open']])
+
+  monitorBusy = true
+  await tick(1_000)
+  await tick(4_000)
+  const response = await first.monitor.handle(new Request('http://localhost/api/monitor/status?portfolioId=101'))
+  assert.match((await response.json()).portfolios[0].error, /11012005/)
+  for (const [instance, user] of [[first, a], [second, b]]) {
+    const strategy = await json(instance.service, 'copy', user.token)
+    assert.equal(strategy.error, '')
+    assert.equal(strategy.events.some(event => /监控|繁忙/.test(event.message)), false)
+  }
+
+  await json(first.service, 'copy', a.token, pause)
+  await json(second.service, 'copy', b.token, pause)
+  first.env.orderStore.monitorWatchlists.save(undefined, [])
+  const closed = { ...opened, side: 'SELL', orderTime: epoch + 20_500, orderUpdateTime: epoch + 20_501,
+    orderId: '9007199254740994' }
+  monitorBusy = false
+  reply = () => ({ list: [closed], total: 1 })
+  await tick(1_000)
+  await tick(4_000)
+  assert.deepEqual(market.orders.slice(2).map(({ scope, kind }) => [scope, kind]), [[`live/${a.id}`, 'close'], [`live/${b.id}`, 'close']])
+  assert.equal(calls.length, 5)
+  assert.equal(market.observed.some(([, request]) => request === 'signals'), false)
+})
+
+test('a saved monitor warning is removed from the current status while execution errors remain', async t => {
+  const { launch } = await harness(t)
+  const { db, service } = launch()
+  await json(service, 'copy', users[0].token, begin)
+  const { state, revision } = db.read('live', users[0].id)
+  const monitorError = '组合 101 带单成交监控暂不可用。币安查询繁忙（11012005），将自动重试。'
+  const orderError = 'BTCUSDT 订单回执待核实，将按原订单号查询。'
+  state.error = monitorError + ' ' + orderError
+  state.events.unshift({ time: epoch, message: monitorError }, { time: epoch, message: orderError })
+  assert.equal(db.write('live', users[0].id, state, revision), true)
+  assert.equal((await json(service, 'copy')).error, orderError)
+})
 
 test('a restarted strategy waits for its UID, ignores missed entries, and resumes with a rotated key', async t => {
   const { launch, tick, market } = await harness(t)
@@ -389,7 +479,7 @@ test('abrupt process exit between exchange submission and acknowledgement recove
     mock.timers.enable({ apis: ['setInterval', 'Date'], now: ${epoch} })
     const env = { orderStore: createLocalOrderDb(process.argv[1]), BINANCE_FUTURES_USERS: process.argv[2] }
     const service = createCopyService(env, () => ({
-      positions: async () => [],
+      positions: async () => ({ mode: 'oneWay', positions: [] }),
       signals: async () => [${JSON.stringify(fillSignal(100, 'open'))}],
       open: async () => process.exit(47)
     }))

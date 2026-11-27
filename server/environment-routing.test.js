@@ -57,8 +57,8 @@ test('requests for a retired environment never reach Binance; all unlabeled requ
   assert.equal((await call('futures/session', 'live', session.token)).status, 401)
 })
 
-test('live copy execution and platform settlement continue after logout', async t => {
-  t.mock.timers.enable({ apis: ['setInterval'] })
+test('live hedge-mode copy execution and platform settlement continue after logout', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1_800_000_000_000 })
   const leaders = []
   const amount = '20'
   const environment = 'live'
@@ -73,7 +73,7 @@ test('live copy execution and platform settlement continue after logout', async 
     switch (url.pathname) {
       case '/api/v3/account': return Response.json({ balances: [], uid: 201 })
       case '/fapi/v3/account': return Response.json({ assets: [] })
-      case '/fapi/v1/positionSide/dual': return Response.json({ dualSidePosition: false })
+      case '/fapi/v1/positionSide/dual': return Response.json({ dualSidePosition: true })
       case '/fapi/v3/positionRisk': return Response.json([])
       case '/api/v3/order':
         assert.equal(init.method, 'POST')
@@ -92,6 +92,7 @@ test('live copy execution and platform settlement continue after logout', async 
     assert.equal(res.status, 200)
     return (await res.json()).token
   }
+  assert.equal((await call('monitor/watchlist', environment, null, { portfolioIds: [] }, 'PUT')).status, 204)
   {
     const token = await login()
     const config = { portfolioIds: [amount], leverage: 1, sizingMode: 'margin', amount: 10, repeat: 'first', maxEntries: 1, maxPositions: 1, stopLoss: 5 }

@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import type { LeadPortfolio } from '../portfolios'
-import { fetchClosedPositions, formatNumber, formatTradeAmount, formatTradeTime, type ClosedPosition } from '../trades'
+import { fetchClosedPositions, formatAmount, formatNumber, formatTradeAmount, formatTradeTime, type ClosedPosition } from '../trades'
 
 const props = defineProps<{ entries: LeadPortfolio[]; updatedAtById: Record<string, number> }>()
 const emit = defineEmits<{ quote: [symbol: string] }>()
@@ -80,7 +80,7 @@ watch([selected, page, refresh], async ([id, number], _, onCleanup) => {
             </td>
             <td>{{ row.side === 'Long' ? '多仓' : row.side === 'Short' ? '空仓' : row.side || '—' }}</td>
             <td class="numeric pnl-cell" :class="{ gain: (row.closingPnl ?? 0) > 0, loss: (row.closingPnl ?? 0) < 0 }">
-              {{ row.closingPnl == null ? '披露不全' : (row.closingPnl > 0 ? '+' : '') + formatTradeAmount(row.closingPnl) }}
+              {{ row.closingPnl == null ? '披露不全' : formatAmount(row.closingPnl, true) }}
               <small v-if="row.closingPnl != null">{{ row.asset }}</small>
             </td>
             <td class="numeric">{{ formatTradeAmount(row.avgCost) }}</td>

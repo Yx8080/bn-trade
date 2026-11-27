@@ -112,6 +112,7 @@ export interface Position {
   entryPrice: string
   markPrice: string
   unrealizedPnl: string
+  positionInitialMargin?: string
   marginAsset: string
   updateTime: number
 }
@@ -147,16 +148,16 @@ export interface PositionAttribution extends Pick<Position, 'symbol' | 'position
   complete: boolean
 }
 
-export interface FuturesFills {
-  market: 'futures'
-  symbol: string
-  limit: number
-  windowDays: number
-  atLimit: boolean
-  trades: (Omit<OtherTrades['trades'][number], 'source'> & {
-    source: 'manual' | 'copy' | 'untracked' | 'unverified'
-    portfolioId: string | null
-  })[]
+export interface FuturesPositionHistory {
+  environment: Environment
+  asOf: number
+  rows: {
+    id: string; symbol: string; direction: 'LONG' | 'SHORT'; positionSide: PositionSide
+    openedAt: number | null; closedAt: number; asset: string | null
+    closedQuantity: string | null
+    avgEntryPrice: string | null; avgClosePrice: string | null; realizedPnl: string | null
+    roi: number | null; roiLeverage: number | null
+  }[]
 }
 
 interface OrderIntent {
@@ -239,13 +240,13 @@ function environmentChanged() {
 }
 
 async function request<T>(path: string, token?: string, signal?: AbortSignal, body?: OrderIntent | CopyCommand,
-  environment = tradingEnvironment): Promise<T> {
+  environment = tradingEnvironment, timeoutMs?: number): Promise<T> {
   if (environment !== tradingEnvironment || (body && body.environment !== tradingEnvironment)) throw environmentChanged()
   const headers = new Headers({ Accept: 'application/json', 'X-Trading-Environment': environment })
   if (token) headers.set('Authorization', 'Bearer ' + token)
   if (body) headers.set('Content-Type', 'application/json')
   const order = body && 'clientOrderId' in body ? body : undefined
-  const timeout = AbortSignal.timeout(order && ('leverage' in order || 'expectedQuantity' in order) ? 28_000 : 16_000)
+  const timeout = AbortSignal.timeout(timeoutMs ?? (order && ('leverage' in order || 'expectedQuantity' in order) ? 28_000 : 16_000))
   let response: Response
   let data
   try {
@@ -349,8 +350,8 @@ export const getCopyStatus = (token: string, signal?: AbortSignal) =>
 export const getOtherTrades = (token: string, market: OtherTrades['market'], symbol: string, signal?: AbortSignal) =>
   request<OtherTrades>('futures/other-trades?' + new URLSearchParams({ market, symbol }), token, signal)
 
-export const getFuturesFills = (token: string, symbol: string, signal?: AbortSignal) =>
-  request<FuturesFills>('futures/other-trades?' + new URLSearchParams({ market: 'futures', symbol, scope: 'all' }), token, signal)
+export const getFuturesPositionHistory = (token: string, environment: Environment, signal?: AbortSignal) =>
+  request<FuturesPositionHistory>('futures/position-history', token, signal, undefined, environment, 60_000)
 
 export const getPositionSources = (token: string, signal?: AbortSignal) =>
   request<{ environment: Environment; positions: PositionAttribution[] }>('futures/position-sources', token, signal)

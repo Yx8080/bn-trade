@@ -9,7 +9,7 @@ const trade = (ms, overrides = {}) => ({ orderUpdateTime: epoch + ms, orderTime:
 const day = 86_400_000
 const success = (rows, indexValue = null, total) => Response.json({ code: '000000', data: { list: rows, indexValue, total } })
 
-function harness(t, store) {
+function harness(t, store, copy) {
   t.mock.timers.enable({ apis: ['setInterval'] })
   let time = epoch
   let portfolioIds = []
@@ -17,6 +17,7 @@ function harness(t, store) {
   const calls = []
   const stored = new Map()
   const sampler = createPortfolioMonitor({ now: () => time, getPortfolioIds: () => portfolioIds,
+    ...copy,
     fetchBinance(url, init) {
       assert.equal(url.href, 'https://www.binance.com/bapi/futures/v1/friendly/future/copy-trade/lead-portfolio/order-history')
       assert.equal(init.method, 'POST')
@@ -179,4 +180,35 @@ test('positions update from an older opening arriving in a later order-history p
   assert.equal(status.lastPositionChangeAt, epoch + 5_000)
   assert.deepEqual(db.observedPositions.page('55', 1, 10).rows.map(row => row.closingPnl), [2])
   assert.equal(h.calls.length, 2)
+})
+
+test('an incomplete sample cannot become a signal batch, and older managed closes are recovered in bounded windows', async t => {
+  const db = createLocalOrderDb(':memory:')
+  t.after(() => db.close())
+  const since = epoch - 2 * day + 3_000
+  const close = trade(-day - 8_000, { side: 'SELL', orderId: '123' })
+  const notices = []
+  const h = harness(t, db.observedTrades, { getCopyPortfolios: () => [{ id: '77', since }],
+    getCopySignals: () => db.copySignals, onCopyUpdate: id => notices.push(id) })
+
+  h.send(() => success([close], '-1', 2))
+  await h.sampler.poll()
+  assert.equal(db.copySignals.read('77', since, epoch), null)
+  assert.match(h.sampler.status(['77'])[0].error, /成交分页不完整/)
+  assert.equal(db.copySignals.status('77').end, null)
+
+  h.send(({ startTime, endTime }) => {
+    const list = [close].filter(row => row.orderUpdateTime >= startTime && row.orderUpdateTime <= endTime)
+    return success(list, null, list.length)
+  })
+  for (const at of [5_000, 10_000, 15_000, 20_000, 25_000, 30_000]) {
+    h.at(at)
+    await h.sampler.poll()
+  }
+  const sample = db.copySignals.read('77', since, epoch + 30_000)
+  assert.equal(sample.through, epoch + 30_000)
+  assert.equal(sample.recoveredAt, epoch + 5_000)
+  assert.deepEqual(sample.signals.map(({ time, kind }) => [time, kind]), [[close.orderUpdateTime, 'close']])
+  assert.deepEqual(notices, ['77', '77'])
+  assert.equal(db.observedTrades.page({ portfolioId: '77', startTime: since, endTime: epoch + 30_000 }).total, 0)
 })

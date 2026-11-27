@@ -2,6 +2,16 @@ import type { Trade } from './trades'
 import { isAppLeverage } from '../shared/leverage.js'
 
 type PositionSide = 'LONG' | 'SHORT'
+const percent = new Intl.NumberFormat('zh-CN', { style: 'percent', maximumFractionDigits: 2 })
+
+export function formatReturnRate(rate: number | null | undefined) {
+  return rate != null && Number.isFinite(rate) ? percent.format(rate) : '—'
+}
+
+export function marginReturn(pnl: number, margin: number): number | null {
+  const rate = pnl / margin
+  return margin > 0 && Number.isFinite(margin) && Number.isFinite(rate * 100) ? rate : null
+}
 
 /** Gross price PnL for a linear contract, using an unsigned quantity in base units. */
 export function linearPnl(side: PositionSide, entryPrice: number, markPrice: number, quantity: number): number | null {
@@ -17,8 +27,8 @@ export function linearPnlFromMargin(side: PositionSide, entryPrice: number, exit
   const quantity = margin * leverage / entryPrice
   const pnl = linearPnl(side, entryPrice, exitPrice, quantity)
   if (pnl === null) return null
-  const roi = pnl / margin
-  return Number.isFinite(roi * 100) ? { pnl, roi } : null
+  const roi = marginReturn(pnl, margin)
+  return roi === null ? null : { pnl, roi }
 }
 
 export function reportedPnl(trade: Trade): number | null {

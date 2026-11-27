@@ -34,7 +34,7 @@ function fixture(config) {
       assert.equal(portfolioId, id)
       return feed.filter(s => s.time >= from && s.time <= to)
     },
-    async positions() { return [...live.values()].map(p => ({ ...p })) },
+    async positions() { return { mode: 'oneWay', positions: [...live.values()].map(p => ({ ...p })) } },
     async open(symbol, direction, amount, clientOrderId) {
       assert.equal(snapshots.at(-1).pending?.clientOrderId, clientOrderId)
       orders.push(['open', symbol, direction, amount, clientOrderId])
@@ -356,7 +356,7 @@ test('an incomplete page is retried over smaller historical windows and cannot h
 test('public-feed rate limit persists its retry deadline and pauses account, order and feed requests until then', async () => {
   const f = fixture()
   let checks = 0
-  f.exchange.positions = async () => { checks++; return [] }
+  f.exchange.positions = async () => { checks++; return { mode: 'oneWay', positions: [] } }
   const signals = f.exchange.signals
   let reads = 0
   f.exchange.signals = async () => {

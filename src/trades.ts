@@ -3,7 +3,10 @@ export const DAY_MS = 86_400_000
 const PAGE_SIZE = 10
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000
 const numberFormat = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 8 })
-const twoDecimalFormat = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const twoDecimalOptions = { minimumFractionDigits: 2, maximumFractionDigits: 2 }
+const twoDecimalFormat = new Intl.NumberFormat('zh-CN', twoDecimalOptions)
+const signedAmountFormat = new Intl.NumberFormat('zh-CN', { ...twoDecimalOptions, signDisplay: 'exceptZero' })
+const feeFormat = new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 3, maximumFractionDigits: 3 })
 const smallAmountFormat = new Intl.NumberFormat('zh-CN', { maximumSignificantDigits: 8 })
 
 export interface Trade {
@@ -59,6 +62,15 @@ export class TradeRequestError extends Error {
 
 export function formatNumber(value: number | null | undefined) {
   return value != null && Number.isFinite(value) ? numberFormat.format(value) : '—'
+}
+
+export function formatAmount(value: number | null | undefined, signed = false) {
+  if (value == null || !Number.isFinite(value)) return '—'
+  return (signed || value <= 0 ? signedAmountFormat : twoDecimalFormat).format(value)
+}
+
+export function formatFee(value: number | null | undefined) {
+  return value != null && Number.isFinite(value) ? feeFormat.format(value) : '—'
 }
 
 export function formatTradeAmount(value: number | null | undefined) {

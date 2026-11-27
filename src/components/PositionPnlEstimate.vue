@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { isAppLeverage } from '../../shared/leverage.js'
 import { linearPnlFromMargin } from '../pnl'
-import { numericValue } from '../trades'
+import { formatAmount, numericValue } from '../trades'
 import LeverageControl from './LeverageControl.vue'
 import WorkspaceDialog from './WorkspaceDialog.vue'
 
@@ -53,7 +53,6 @@ const resultTone = computed(() => {
   const pnl = estimate.value?.pnl ?? 0
   return { gain: pnl > 0, loss: pnl < 0 }
 })
-const money = new Intl.NumberFormat('zh-CN', { signDisplay: 'exceptZero', minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const percent = new Intl.NumberFormat('zh-CN', { style: 'percent', signDisplay: 'exceptZero', maximumFractionDigits: 0 })
 </script>
 
@@ -96,7 +95,7 @@ const percent = new Intl.NumberFormat('zh-CN', { style: 'percent', signDisplay: 
       <dl class="pnl-results" aria-live="polite" aria-atomic="true">
         <div>
           <dt>预估盈亏</dt>
-          <dd :class="resultTone">{{ estimate ? money.format(estimate.pnl) + ' USDT' : '—' }}</dd>
+          <dd :class="resultTone">{{ estimate ? formatAmount(estimate.pnl, true) + ' USDT' : '—' }}</dd>
         </div>
         <div>
           <dt>预估盈亏率</dt>

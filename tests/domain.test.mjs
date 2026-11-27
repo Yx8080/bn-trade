@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { fetchObservedTrades, fetchClosedPositions, fetchObservationStatus, saveMonitoredPortfolios, formatTradeAmount, TradeRequestError } from '../src/trades.ts'
-import { linearPnl, linearPnlFromMargin, reportedPnl, summarizeReportedPnl } from '../src/pnl.ts'
+import { fetchObservedTrades, fetchClosedPositions, fetchObservationStatus, saveMonitoredPortfolios, formatAmount, formatFee, formatNumber, formatTradeAmount, TradeRequestError } from '../src/trades.ts'
+import { formatReturnRate, linearPnl, linearPnlFromMargin, marginReturn, reportedPnl, summarizeReportedPnl } from '../src/pnl.ts'
 import { loadWatchlist, saveWatchlist } from '../src/portfolios.ts'
 
 test('成交金额按绝对值选择显示精度，披露盈亏在汇总后取舍小数', () => {
@@ -16,9 +16,23 @@ test('成交金额按绝对值选择显示精度，披露盈亏在汇总后取�
 
   const close = { positionSide: 'LONG', side: 'SELL', executedQty: 1, quoteAsset: 'USDT', totalPnl: 3.004 }
   const [summary] = summarizeReportedPnl([close, close])
-  assert.equal(formatTradeAmount(reportedPnl(close)), '3.00')
+  assert.equal(formatAmount(reportedPnl(close), true), '+3.00')
   assert.equal(summary.pnl, 6.008)
-  assert.equal(formatTradeAmount(summary.pnl), '6.01')
+  assert.equal(formatAmount(summary.pnl, true), '+6.01')
+})
+
+test('盈亏和手续费以固定小数位显示，价格保留原有精度', () => {
+  assert.equal(formatAmount(4.13655999, true), '+4.14')
+  assert.equal(formatAmount(-0.6917235), '-0.69')
+  assert.equal(formatAmount(0.48883072), '0.49')
+  assert.equal(formatAmount(-0.001, true), '0.00')
+  assert.equal(formatAmount(-0.001), '0.00')
+  assert.equal(formatAmount(1), '1.00')
+  assert.equal(formatAmount(null), '—')
+  assert.equal(formatFee(0.05319146), '0.053')
+  assert.equal(formatFee(0.05), '0.050')
+  assert.equal(formatFee(Number.NaN), '—')
+  assert.equal(formatNumber(0.00093765), '0.00093765')
 })
 
 test('公开查询保留服务端错误说明和限流时间，纯文本错误回退到 HTTP 状态', async t => {
@@ -83,6 +97,15 @@ test('按保证金和杠杆试算线性合约盈亏及回报率', () => {
   assert.equal(linearPnlFromMargin('LONG', 0, 110, 100, 5), null)
   assert.equal(linearPnlFromMargin('LONG', 100, 110, 100, 1.5), null)
   assert.equal(linearPnlFromMargin('LONG', 100, 110, Number.MAX_VALUE, 5), null)
+})
+
+test('保证金收益率按比例显示并保留正负方向，缺少有效保证金时留空', () => {
+  assert.equal(formatReturnRate(marginReturn(5, 10)), '50%')
+  assert.equal(formatReturnRate(marginReturn(10, 10)), '100%')
+  assert.equal(formatReturnRate(marginReturn(-5, 10)), '-50%')
+  assert.equal(formatReturnRate(marginReturn(0, 10)), '0%')
+  assert.equal(formatReturnRate(marginReturn(10, 0)), '—')
+  assert.equal(formatReturnRate(marginReturn(10, NaN)), '—')
 })
 
 test('完整仓位按本地记录分页，保留结算币种与未披露盈亏', async t => {

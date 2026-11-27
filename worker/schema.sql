@@ -71,6 +71,38 @@ CREATE TABLE IF NOT EXISTS monitor_watchlists (
   owner_id TEXT PRIMARY KEY, portfolio_ids TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS copy_signal_samples (
+  portfolio_id TEXT PRIMARY KEY,
+  start_time INTEGER,
+  end_time INTEGER,
+  recovered_at INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS copy_signals (
+  portfolio_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  time INTEGER NOT NULL,
+  symbol TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  PRIMARY KEY (portfolio_id, id)
+);
+CREATE INDEX IF NOT EXISTS copy_signals_by_portfolio_time ON copy_signals (portfolio_id, time);
+CREATE INDEX IF NOT EXISTS copy_signals_by_time ON copy_signals (time);
+
+CREATE TABLE IF NOT EXISTS portfolio_monitor_lease (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  owner TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  next_at INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS portfolio_monitor_status (
+  portfolio_id TEXT PRIMARY KEY,
+  payload TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS observed_trades (
   revision INTEGER PRIMARY KEY, portfolio_id TEXT NOT NULL, trade_key TEXT NOT NULL,
   updated_at INTEGER NOT NULL, payload TEXT NOT NULL, superseded_at_revision INTEGER

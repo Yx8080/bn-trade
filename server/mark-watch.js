@@ -126,10 +126,11 @@ export function createMarkWatch(connectSocket, onThreshold) {
       for (const item of rows) {
         if (!item?.userId || !isUsdtSymbol(item.symbol) || !['LONG', 'SHORT'].includes(item.direction)
           || ![item.quantity, item.entryPrice, item.stopLoss].every(value => Number.isFinite(value) && value > 0)) continue
-        const previous = positions.get(item.symbol)?.get(item.userId)
+        const key = item.userId + '/' + item.direction
+        const previous = positions.get(item.symbol)?.get(key)
         const triggered = previous?.triggered && ['direction', 'quantity', 'entryPrice', 'stopLoss'].every(key => previous[key] === item[key])
         if (!next.has(item.symbol)) next.set(item.symbol, new Map())
-        next.get(item.symbol).set(item.userId, { ...item, triggered })
+        next.get(item.symbol).set(key, { ...item, triggered })
         users.add(item.userId)
       }
       positions = next

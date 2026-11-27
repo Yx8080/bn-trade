@@ -36,3 +36,23 @@ export function createMonitorWatchlists(db) {
 
   return { ids, save: write, get(owner) { return JSON.parse(read.get(owner ?? guest)?.ids ?? 'null') } }
 }
+
+export function createMonitorSamplerStore(db) {
+  const lease = db.prepare(`INSERT INTO portfolio_monitor_lease (id, owner, expires_at) VALUES (1, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at
+    WHERE owner = excluded.owner OR expires_at <= ? RETURNING next_at AS nextAt`)
+  const schedule = db.prepare('UPDATE portfolio_monitor_lease SET next_at = ? WHERE id = 1 AND owner = ?')
+  const release = db.prepare('UPDATE portfolio_monitor_lease SET expires_at = 0 WHERE id = 1 AND owner = ?')
+  const status = db.prepare('SELECT payload FROM portfolio_monitor_status WHERE portfolio_id = ?')
+  const save = db.prepare(`INSERT INTO portfolio_monitor_status (portfolio_id, payload) VALUES (?, ?)
+    ON CONFLICT(portfolio_id) DO UPDATE SET payload = excluded.payload`)
+  const remove = db.prepare('DELETE FROM portfolio_monitor_status WHERE portfolio_id = ?')
+  return {
+    claim: (owner, now, expires) => lease.get(owner, expires, now),
+    schedule: (owner, nextAt) => schedule.run(nextAt, owner),
+    release: owner => release.run(owner),
+    status: id => JSON.parse(status.get(id)?.payload ?? 'null'),
+    save: value => save.run(value.portfolioId, JSON.stringify(value)),
+    remove: id => remove.run(id),
+  }
+}

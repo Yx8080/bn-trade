@@ -18,11 +18,14 @@ const rulesError = ref('')
 const failure = ref('')
 const changed = ref(false)
 const submitting = ref(false)
-const checking = ref(false)
-const forget = ref(false)
+const verificationDelayed = ref(false)
 const receipt = ref<OrderResult | null>(null)
 const key = computed(() => pendingOrderKey(props.session.id, props.session.environment, 'futures-close'))
 const pending = ref<PendingOrder | null>(readPending(key.value))
+const verificationStatus = computed(() => {
+  if (!props.token) return '重新连接币安账户后将自动继续核实。'
+  return verificationDelayed.value ? '暂未核实平仓结果，系统会自动重试。' : '正在向币安核实平仓结果…'
+})
 let active = true
 onUnmounted(() => { active = false })
 
@@ -73,15 +76,56 @@ function editQuantity(event: Event) {
   amount.value = (event.target as HTMLInputElement).value.trim()
 }
 function close() {
-  if (!submitting.value && !checking.value) emit('close')
+  if (!submitting.value) emit('close')
 }
 function record(data: OrderResult) {
+  const fillChanged = receipt.value?.executedQty !== data.executedQty
+  const final = ['FILLED', 'EXPIRED', 'CANCELED', 'REJECTED', 'EXPIRED_IN_MATCH'].includes(data.status)
   receipt.value = data
-  if (['FILLED', 'EXPIRED', 'CANCELED', 'REJECTED', 'EXPIRED_IN_MATCH'].includes(data.status)) setPending(null)
-  failure.value = ''
-  emit('refresh')
-  emit('close')
+  if (final) setPending(null)
+  if (final || fillChanged) emit('refresh')
 }
+
+watch([pending, submitting, () => props.token], ([order, sending, token], _, cleanup) => {
+  verificationDelayed.value = false
+  if (!order || sending || !token) return
+  const { symbol, clientOrderId } = order
+  const controller = new AbortController()
+  const { signal } = controller
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let delay = 1_000
+  cleanup(() => {
+    controller.abort()
+    clearTimeout(timer)
+  })
+
+  async function reconcile() {
+    let wait = delay
+    try {
+      const data = await lookupOrder(token, symbol, clientOrderId, signal)
+      if (signal.aborted) return
+      if (data?.symbol !== symbol || data.clientOrderId !== clientOrderId || data.type !== 'MARKET' ||
+        typeof data.status !== 'string' || typeof data.executedQty !== 'string' || typeof data.orderId !== 'string' ||
+        (receipt.value && receipt.value.orderId !== data.orderId)) {
+        throw Error('返回的订单信息与待核实的平仓单不一致。')
+      }
+      verificationDelayed.value = false
+      record(data)
+      if (!pending.value) {
+        emit('close')
+        return
+      }
+    } catch (e) {
+      if (signal.aborted) return
+      verificationDelayed.value = true
+      if (e instanceof FuturesError && (e.status === 418 || e.status === 429)) wait = 60_000
+    }
+    delay = Math.min(wait * 2, 60_000)
+    timer = setTimeout(reconcile, wait)
+  }
+  void reconcile()
+}, { immediate: true })
+
 async function submit() {
   const row = props.position
   if (!valid.value || !row) return
@@ -96,11 +140,13 @@ async function submit() {
   setPending({ symbol: row.symbol, clientOrderId })
   try {
     const result = await closePosition(props.token, input)
-    if (active && owner === key.value) record(result)
+    if (!active || owner !== key.value) return
+    record(result)
+    emit('close')
   } catch (e) {
     if (!active || owner !== key.value) return
-    failure.value = e instanceof Error ? e.message : '平仓结果待核实，请查询原订单。'
     if (e instanceof FuturesError && e.code !== 'ORDER_UNKNOWN') {
+      failure.value = e.message
       setPending(null)
       if (e.code === 'POSITION_CHANGED') {
         changed.value = true
@@ -113,34 +159,6 @@ async function submit() {
     submitting.value = false
   }
 }
-async function reconcile() {
-  const order = pending.value
-  if (!order || checking.value || submitting.value) return
-  const owner = key.value
-  checking.value = true
-  failure.value = ''
-  try {
-    const data = await lookupOrder(props.token, order.symbol, order.clientOrderId)
-    if (!active || owner !== key.value) return
-    if (data.symbol !== order.symbol || data.clientOrderId !== order.clientOrderId ||
-      typeof data.status !== 'string' || typeof data.executedQty !== 'string' || typeof data.orderId !== 'string')
-      throw Error('返回的订单信息与待核实的平仓单不一致。')
-    record(data)
-  } catch (e) {
-    if (active && owner === key.value) failure.value = e instanceof Error ? e.message : '暂未查到平仓订单。'
-  } finally {
-    checking.value = false
-  }
-}
-function clearVerified() {
-  if (submitting.value || checking.value) return
-  setPending(null)
-  forget.value = false
-  receipt.value = null
-  failure.value = ''
-  emit('close')
-  emit('refresh')
-}
 </script>
 
 <template>
@@ -148,21 +166,18 @@ function clearVerified() {
     <strong>{{ pending.symbol }} · 平仓订单待核实</strong>
     <div>客户订单号 {{ pending.clientOrderId }}</div>
     <div v-if="receipt">{{ receipt.status }} · 已成交 {{ receipt.executedQty }}</div>
-    <div v-if="failure">{{ failure }}</div>
-    <button type="button" class="text-button" :disabled="checking" @click="reconcile">{{ checking ? '查询中…' : '查询原订单' }}</button>
-    <button type="button" class="text-button muted" :disabled="checking" @click="forget = true">已在币安核实</button>
+    <div>{{ verificationStatus }}</div>
   </div>
   <div v-else-if="receipt" class="receipt close-receipt" role="status">
     <strong>{{ receipt.symbol }} · 平仓回执</strong>
     <div>{{ receipt.status }} · 已成交 {{ receipt.executedQty }} · 订单号 {{ receipt.orderId }}</div>
     <button type="button" class="text-button" @click="receipt = null">收起</button>
   </div>
-  <WorkspaceDialog v-if="position && pending && !submitting && !forget" title="核实上一笔平仓订单" @close="close">
-    <p class="dialog-description">请先核对 {{ pending.symbol }} 的平仓结果。客户订单号 {{ pending.clientOrderId }}。</p>
-    <p v-if="failure" class="notice error" role="alert">{{ failure }}</p>
+  <WorkspaceDialog v-if="position && pending && !submitting" title="上一笔平仓订单待核实" @close="close">
+    <p class="dialog-description">{{ pending.symbol }} · 客户订单号 {{ pending.clientOrderId }}。</p>
+    <p class="ticket-hint" role="status">{{ verificationStatus }}</p>
     <div class="dialog-actions">
-      <button type="button" class="btn" :disabled="checking" @click="close">返回</button>
-      <button type="button" class="btn primary" :disabled="checking" @click="reconcile">{{ checking ? '查询中…' : '查询原订单' }}</button>
+      <button type="button" class="btn" @click="close">返回</button>
     </div>
   </WorkspaceDialog>
   <WorkspaceDialog v-if="position && (!pending || submitting)" title="市价平仓" @close="close">
@@ -202,13 +217,6 @@ function clearVerified() {
     <div class="dialog-actions">
       <button type="button" class="btn" :disabled="submitting" @click="close">{{ changed ? '返回持仓' : '取消' }}</button>
       <button type="button" class="btn primary" :disabled="!valid" @click="submit">{{ submitting ? '正在提交…' : '确认实盘平仓' }}</button>
-    </div>
-  </WorkspaceDialog>
-  <WorkspaceDialog v-if="forget && pending" title="结束平仓订单核实" @close="forget = false">
-    <p class="dialog-description">请先在币安核实 {{ pending.symbol }} 的订单 {{ pending.clientOrderId }}。确认后将清除本次待查提醒。</p>
-    <div class="dialog-actions">
-      <button type="button" class="btn" @click="forget = false">返回</button>
-      <button type="button" class="btn primary" @click="clearVerified">已核实，清除提醒</button>
     </div>
   </WorkspaceDialog>
 </template>

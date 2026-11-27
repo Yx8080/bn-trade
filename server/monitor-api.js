@@ -1,4 +1,4 @@
-import { ApiError, apiErrorResponse, getTradingUser, jsonResponse } from '../worker/trading.js'
+import { ApiError, apiErrorResponse, getTradingEnvironment, getTradingUser, jsonResponse } from '../worker/trading.js'
 import { createPortfolioMonitor } from './portfolio-monitor.js'
 import { validMonitorIds } from './monitor-watchlists.js'
 
@@ -15,9 +15,11 @@ function methodRequired(expected) {
   return jsonResponse({ message: '请求方法无效。' }, 405, { Allow: expected })
 }
 
-export function createMonitorApi(env) {
+export function createMonitorApi(env, onCopyUpdate) {
   const sampler = createPortfolioMonitor({ fetchBinance: env.fetchBinance, getStore: () => env.orderStore.observedTrades,
-    getPortfolioIds: () => env.orderStore.monitorWatchlists.ids() })
+    getPortfolioIds: () => env.orderStore.monitorWatchlists.ids(), getSamplerStore: () => env.orderStore.monitorSampler,
+    getCopyPortfolios: () => env.orderStore.copy.monitoredPortfolios(getTradingEnvironment(env)),
+    getCopySignals: () => env.orderStore.copySignals, onCopyUpdate })
 
   async function handle(request) {
     try {
@@ -59,8 +61,7 @@ export function createMonitorApi(env) {
       const input = await request.json().catch(() => null)
       if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ApiError(400, 'INVALID_MONITOR_REQUEST', '监控参数无效。')
       // Older open tabs may still call the previous public history routes.
-      // Serve the same local archive there. Private copy execution uses its
-      // own transport directly and cannot be started by browsing a table.
+      // Serve the same local archive there.
       if (pathname === '/api/binance/latest-records') {
         const page = env.orderStore.observedTrades.page({ portfolioId: input.portfolioId, startTime: input.startTime,
           endTime: input.endTime, pageSize: input.pageSize, cursor: input.indexValue })

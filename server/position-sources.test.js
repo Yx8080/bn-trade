@@ -44,6 +44,10 @@ test('journaled copy round trips leave the verified manual base eligible at the 
     fill('BUY', '0.10', 'manual', 17)]
   const expected = { complete: true, sources: [{ kind: 'manual' }], manualOnly: true }
   assert.deepEqual(tracePosition(position('0.1', '102.30769231'), cycle), expected)
+  const hedge = { ...position('0.1', '102.30769231'), positionSide: 'LONG' }
+  const hedgeFills = [fill('SELL', '0.5', 'untracked', 20, { positionSide: 'SHORT' }),
+    ...cycle.map(row => ({ ...row, positionSide: 'LONG' }))]
+  assert.deepEqual(tracePosition(hedge, hedgeFills), expected)
   const second = [copy('close', '0.02', '95', 22, '2'), copy('open', '0.02', '90', 21, '2'), ...cycle]
   assert.deepEqual(tracePosition({ ...position('0.1', '100.25641026'), updateTime: 22 }, second), expected)
   for (const mismatch of [{ portfolioId: '2' }, { copyDirection: 'SHORT' }, { copyKind: null }]) {

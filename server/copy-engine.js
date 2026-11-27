@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { isUsdtSymbol } from '../worker/trading.js'
+import { copySignalHistory, copySignalOverlap } from './copy-signals.js'
 
 const freshnessMs = 30_000
-const overlapMs = 10_000
-const historyMs = 29 * 86_400_000
 const catchupSpanMs = 3_600_000
 const running = new WeakSet()
 const terminal = new Set(['FILLED', 'CANCELED', 'REJECTED', 'EXPIRED', 'EXPIRED_IN_MATCH'])
@@ -11,6 +10,7 @@ const active = new Set(['NEW', 'PARTIALLY_FILLED', 'PENDING_CANCEL'])
 const closeEnough = (a, b, fraction = 1e-10) => Math.abs(a - b) <= Math.max(a, b) * fraction
 const rounded = value => Number(value.toPrecision(15))
 const describe = error => error instanceof Error ? error.message.slice(0, 250) : '请求失败。'
+const positionKey = ({ symbol, positionSide = 'BOTH' }) => positionSide === 'BOTH' ? symbol : symbol + '/' + positionSide
 
 function initializeFeeds(state) {
   if (state.feeds) return
@@ -26,17 +26,17 @@ function initializeFeeds(state) {
   delete state.recoveringFeed
 }
 
-export async function runCopyTick(state, exchange, save, now = Date.now()) {
+export async function runCopyTick(state, exchange, save, now = Date.now(), readSignals = exchange.signals) {
   if (running.has(state)) return
   running.add(state)
   try {
-    await tick(state, exchange, save, now)
+    await tick(state, exchange, save, now, readSignals)
   } finally {
     running.delete(state)
   }
 }
 
-async function tick(state, exchange, save, now) {
+async function tick(state, exchange, save, now, readSignals) {
   if (state.retryAt > now) return
   state.retryAt = 0
   const wallStart = Date.now()
@@ -47,7 +47,7 @@ async function tick(state, exchange, save, now) {
   state.exitBarriers ??= {}
   state.lastCheck = now
   const checked = new Set()
-  const owned = symbol => state.positions.find(position => position.symbol === symbol)
+  const owned = (symbol, positionSide) => state.positions.find(position => positionKey(position) === positionKey({ symbol, positionSide }))
   const persist = execution => save(structuredClone(state), execution)
 
   function invalidatePnl() {
@@ -80,18 +80,20 @@ async function tick(state, exchange, save, now) {
     problem(message)
   }
 
-  function blockEntriesThrough(symbol, time) {
-    state.exitBarriers[symbol] = Math.max(state.exitBarriers[symbol] ?? 0, time)
+  function blockEntriesThrough(key, time) {
+    state.exitBarriers[key] = Math.max(state.exitBarriers[key] ?? 0, time)
   }
 
   // A cumulative acknowledgement is applied against the immutable pre-order snapshot.
   // A crash before/after saving a partial fill can therefore replay the same lookup.
   function applyAck(pending, ack) {
+    const positionSide = pending.positionSide ?? 'BOTH'
     const buying = (pending.kind === 'open') === (pending.direction === 'LONG')
     const qty = Number(ack?.executedQty)
     const price = Number(ack?.avgPrice)
     if (!ack || ack.symbol !== pending.symbol || ack.clientOrderId !== pending.clientOrderId
       || ack.side !== (buying ? 'BUY' : 'SELL') || ack.type !== 'MARKET'
+      || (ack.positionSide ?? 'BOTH') !== positionSide
       || typeof ack.orderId !== 'string' || !/^\d+$/.test(ack.orderId)
       || (pending.orderId && ack.orderId !== pending.orderId)
       || typeof ack.executedQty !== 'string' || !/^\d+(\.\d+)?$/.test(ack.executedQty)
@@ -102,10 +104,10 @@ async function tick(state, exchange, save, now) {
       problem(pending.symbol + ' 订单回执待核实，将按原订单号查询。')
       return
     }
-    let position = owned(pending.symbol)
+    let position = owned(pending.symbol, positionSide)
     if (qty > 0 && pending.kind === 'open') {
       if (!position) {
-        position = { symbol: pending.symbol, portfolioId: pending.portfolioId, direction: pending.direction, signalTime: pending.signalTime }
+        position = { symbol: pending.symbol, portfolioId: pending.portfolioId, direction: pending.direction, positionSide, signalTime: pending.signalTime }
         state.positions.push(position)
       }
       position.quantity = rounded(pending.baseQuantity + qty)
@@ -148,12 +150,15 @@ async function tick(state, exchange, save, now) {
     }
   }
 
-  async function submit(kind, symbol, direction, portfolioId, signalTime, manualBase) {
-    const position = owned(symbol)
+  async function submit(kind, symbol, direction, positionSide, portfolioId, signalTime, manualBase) {
+    const key = positionKey({ symbol, positionSide })
+    const position = owned(symbol, positionSide)
     const shared = position?.shared ?? manualBase
-    const guard = shared ? { actual: account.get(symbol), lastOrderId: shared.lastOrderId } : undefined
+    const guard = shared || positionSide !== 'BOTH' || !position
+      ? { positionSide, ...(!position && !manualBase ? { flat: true } : { actual: account.get(key), lastOrderId: shared?.lastOrderId }) }
+      : undefined
     const pending = {
-      kind, symbol, direction, portfolioId, clientOrderId: randomUUID(), baseQuantity: position?.quantity ?? 0,
+      kind, symbol, direction, positionSide, portfolioId, clientOrderId: randomUUID(), baseQuantity: position?.quantity ?? 0,
       baseEntryPrice: position?.entryPrice ?? 0, baseEntries: position?.entries ?? 0,
       signalTime: position?.signalTime ?? signalTime, time: currentTime(),
       ...(shared && { shared: { ...shared } }),
@@ -165,7 +170,7 @@ async function tick(state, exchange, save, now) {
     try {
       ack = kind === 'open'
         ? await exchange.open(symbol, direction, state.config.amount, pending.clientOrderId,
-          state.config.leverage ?? undefined, state.config.sizingMode ?? 'notional', guard ?? (!position ? { flat: true } : undefined))
+          state.config.leverage ?? undefined, state.config.sizingMode ?? 'notional', guard)
         : await exchange.close(symbol, direction, pending.baseQuantity, pending.clientOrderId, guard)
     } catch (error) {
       if (error?.definite === true) state.pending = null
@@ -190,15 +195,18 @@ async function tick(state, exchange, save, now) {
   }
 
   let account
+  let accountMode
   let accountFailed = false
   async function readAccount() {
     try {
-      const positions = await exchange.positions()
-      if (!Array.isArray(positions) || positions.some(p => !p || typeof p.symbol !== 'string'
+      const { mode, positions } = await exchange.positions()
+      if (!['oneWay', 'hedge'].includes(mode) || !Array.isArray(positions) || positions.some(p => !p || typeof p.symbol !== 'string'
         || !['LONG', 'SHORT'].includes(p.direction) || !Number.isFinite(p.quantity) || p.quantity <= 0
+        || (p.positionSide ?? 'BOTH') !== (mode === 'hedge' ? p.direction : 'BOTH')
         || !Number.isFinite(p.entryPrice) || p.entryPrice <= 0 || !Number.isFinite(p.unrealizedPnl))
-        || new Set(positions.map(p => p.symbol)).size !== positions.length) throw Error('账户持仓数据无效。')
-      account = new Map(positions.map(p => [p.symbol, p]))
+        || new Set(positions.map(positionKey)).size !== positions.length) throw Error('账户持仓数据无效。')
+      account = new Map(positions.map(p => [positionKey(p), p]))
+      accountMode = mode
     } catch (error) {
       account = undefined
       accountFailed = true
@@ -215,7 +223,7 @@ async function tick(state, exchange, save, now) {
   }
 
   function strategyPnl(position) {
-    const actual = account.get(position.symbol)
+    const actual = account.get(positionKey(position))
     if (!position.shared) return actual.unrealizedPnl
     const sign = position.direction === 'LONG' ? 1 : -1
     return sign * (actual.markPrice - position.entryPrice) * position.quantity
@@ -223,7 +231,7 @@ async function tick(state, exchange, save, now) {
 
   if (state.positions.length || state.pending) await readAccount()
   if (state.retryAt) { persist(); return }
-  if (account && !state.pending && state.positions.every(p => matches(p, account.get(p.symbol)))) {
+  if (account && !state.pending && state.positions.every(p => matches(p, account.get(positionKey(p))))) {
     state.unrealized = state.positions.reduce((total, p) => total + strategyPnl(p), 0)
     state.unrealizedAt = currentTime()
   } else {
@@ -231,7 +239,7 @@ async function tick(state, exchange, save, now) {
   }
 
   function requestExit(position, time, reason) {
-    blockEntriesThrough(position.symbol, time)
+    blockEntriesThrough(positionKey(position), time)
     if (!position.exit) {
       position.exit = reason
       log(position.symbol + ' ' + reason + '，将仅减仓平掉跟单数量。')
@@ -241,7 +249,7 @@ async function tick(state, exchange, save, now) {
 
   function releasePosition(position) {
     state.positions.splice(state.positions.indexOf(position), 1)
-    blockEntriesThrough(position.symbol, currentTime())
+    blockEntriesThrough(positionKey(position), currentTime())
     log(position.symbol + ' 账户仓位与跟单成交不符，已停止接管该仓位。')
     state.unrealized = null
     state.unrealizedAt = null
@@ -253,14 +261,14 @@ async function tick(state, exchange, save, now) {
     checked.add(position)
     if (refresh) await readAccount()
     if (!account || state.retryAt) return
-    if (!matches(position, account.get(position.symbol))) return releasePosition(position)
-    await submit('close', position.symbol, position.direction, position.portfolioId)
+    if (!matches(position, account.get(positionKey(position)))) return releasePosition(position)
+    await submit('close', position.symbol, position.direction, position.positionSide ?? 'BOTH', position.portfolioId)
   }
 
   for (const position of [...state.positions]) {
     if (!account) continue
-    const actual = account.get(position.symbol)
-    const verifying = state.pending?.symbol === position.symbol
+    const actual = account.get(positionKey(position))
+    const verifying = state.pending && positionKey(state.pending) === positionKey(position)
     if (!matches(position, actual)) {
       if (verifying) continue
       releasePosition(position)
@@ -279,7 +287,7 @@ async function tick(state, exchange, save, now) {
     const pending = state.pending?.portfolioId === portfolioId ? state.pending : null
     const managing = Boolean(positions.length || pending)
     if (!state.enabled && !managing) return
-    const earliest = now - (managing ? historyMs : freshnessMs)
+    const earliest = now - (managing ? copySignalHistory : freshnessMs)
     if (managing && feed.since < earliest) {
       for (const position of positions) position.historyGap = true
       if (pending?.kind === 'open') pending.historyGap = true
@@ -287,17 +295,24 @@ async function tick(state, exchange, save, now) {
     if (positions.some(p => p.historyGap) || pending?.historyGap) {
       problem('组合 ' + portfolioId + ' 超出可核对的公开成交窗口，部分平仓信号可能缺失。请在币安核对现有仓位。')
     }
-    const start = Math.max(feed.floor, feed.since - (feed.catchupSpan ? 0 : overlapMs), earliest)
-    const until = managing ? Math.min(now, Math.max(feed.since, earliest) + (feed.catchupSpan ?? catchupSpanMs)) : now
+    const start = Math.max(feed.floor, feed.since - (feed.catchupSpan ? 0 : copySignalOverlap), earliest)
+    const latest = managing ? Math.min(now, Math.max(feed.since, earliest) + (feed.catchupSpan ?? catchupSpanMs)) : now
     try {
-      const signals = await exchange.signals(portfolioId, start, until)
+      const sample = await readSignals(portfolioId, start, latest)
+      if (!sample) return
+      const signals = Array.isArray(sample) ? sample : sample.signals
+      const until = Array.isArray(sample) ? latest : sample.through
+      if (!Array.isArray(sample) && until <= feed.since) return
       if (!Array.isArray(signals) || signals.some(s => !s || typeof s.id !== 'string' || !s.id
         || !Number.isSafeInteger(s.time) || typeof s.symbol !== 'string'
         || !['open', 'close'].includes(s.kind) || !['LONG', 'SHORT'].includes(s.direction))) {
         throw Error('带单成交格式无效。')
       }
+      if (sample.recoveredAt > (feed.monitorRecoveryAt ?? 0)) {
+        feed.openedAfter = Math.max(feed.openedAfter, sample.recoveredAt)
+        feed.monitorRecoveryAt = sample.recoveredAt
+      }
       if (now - feed.since > freshnessMs || feed.recovering) {
-        if (!accountFailed && state.enabled && until === now) log('组合 ' + portfolioId + ' 巡检恢复，等待新的开仓信号。')
         feed.openedAfter = Math.max(feed.openedAfter, now)
         feed.recovering = accountFailed
       }
@@ -307,9 +322,9 @@ async function tick(state, exchange, save, now) {
     } catch (error) {
       feed.recovering = true
       if (managing && error?.code === 'INCOMPLETE_COPY_SIGNALS') {
-        feed.catchupSpan = Math.max(1000, Math.floor((until - Math.max(feed.since, earliest)) / 2))
+        feed.catchupSpan = Math.max(1000, Math.floor((latest - Math.max(feed.since, earliest)) / 2))
       }
-      exchangeProblem('组合 ' + portfolioId + (managing ? ' 尚未核实带单员是否平仓。' : ' 无法取得带单成交。'), error)
+      exchangeProblem('组合 ' + portfolioId + (managing ? ' 本地跟单信号读取失败，尚未核实平仓。' : ' 无法读取本地跟单信号。'), error)
     }
   }
 
@@ -325,9 +340,11 @@ async function tick(state, exchange, save, now) {
       if (seen.has(signal.id)) continue
       seen.add(signal.id)
       feed.seen.push(signal.id)
-      const position = owned(symbol)
+      const directionKey = positionKey({ symbol, positionSide: direction })
+      const position = owned(symbol, direction) ?? owned(symbol, 'BOTH')
       if (signal.kind === 'close') {
         feed.exitBarriers[symbol] = Math.max(feed.exitBarriers[symbol] ?? 0, time)
+        feed.exitBarriers[directionKey] = Math.max(feed.exitBarriers[directionKey] ?? 0, time)
         if (state.pending?.portfolioId === portfolioId && state.pending.symbol === symbol
           && state.pending.kind === 'open' && state.pending.direction === direction
           && time >= (state.pending.signalTime ?? 0)) {
@@ -339,21 +356,27 @@ async function tick(state, exchange, save, now) {
         }
         continue
       }
-      if (time <= Math.max(state.openedAfter, feed.openedAfter, feed.exitBarriers[symbol] ?? 0, state.exitBarriers[symbol] ?? 0)
+      if (time <= Math.max(state.openedAfter, feed.openedAfter, feed.exitBarriers[directionKey] ?? 0)
         || currentTime() - time > freshnessMs
         || !state.enabled || state.pending || state.retryAt || accountFailed || position?.exit || position?.historyGap) continue
+      const sameSymbol = state.positions.some(p => p.symbol === symbol)
       if (position) {
         if (position.portfolioId !== portfolioId) {
           log(symbol + ' 已由组合 ' + position.portfolioId + ' 持仓，跳过组合 ' + portfolioId + ' 的开仓。')
           continue
         }
         if (position.direction !== direction || state.config.repeat !== 'fixed' || position.entries >= state.config.maxEntries) continue
-      } else if (state.positions.length >= state.config.maxPositions) {
+      } else if (!sameSymbol && new Set(state.positions.map(p => p.symbol)).size >= state.config.maxPositions) {
         continue
       }
       await readAccount()
       if (!account || state.retryAt || currentTime() - time > freshnessMs) continue
-      if (position && !matches(position, account.get(symbol))) {
+      const positionSide = accountMode === 'hedge' ? direction : 'BOTH'
+      const key = positionKey({ symbol, positionSide })
+      if (time <= Math.max(feed.exitBarriers[key] ?? 0, state.exitBarriers[key] ?? 0)) continue
+      // If the exchange mode changed during this tick, reconcile the old leg first.
+      if (sameSymbol && (position ? positionKey(position) !== key : positionSide === 'BOTH')) continue
+      if (position && !matches(position, account.get(key))) {
         releasePosition(position)
         continue
       }
@@ -363,7 +386,7 @@ async function tick(state, exchange, save, now) {
         continue
       }
       let manualBase
-      const existing = account.get(symbol)
+      const existing = account.get(key)
       if (!position && existing) {
         if (state.config.manualPositionPolicy !== 'add' || existing.direction !== direction) {
           log(symbol + ' 已有' + (existing.direction === direction ? '同向' : '反向') + '仓位，跳过本次跟单。')
@@ -381,7 +404,7 @@ async function tick(state, exchange, save, now) {
         if (currentTime() - time > freshnessMs) continue
         manualBase = { manualQuantity: existing.quantity, accountEntryPrice: existing.entryPrice }
       }
-      await submit('open', symbol, direction, portfolioId, time, manualBase)
+      await submit('open', symbol, direction, positionSide, portfolioId, time, manualBase)
     }
     for (const { feed, start, until } of batches) {
       feed.since = Math.max(feed.since, until)
@@ -396,8 +419,7 @@ async function tick(state, exchange, save, now) {
     }
   }
 
-  // A slow paginated feed must not hold up an exit already returned by another
-  // leader. Merge the available batches by signal time and serialize all effects.
+  // Process each portfolio independently and serialize order effects.
   const feeds = Object.entries(state.feeds)
   const reading = new Set()
   const ready = []

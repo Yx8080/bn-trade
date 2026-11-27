@@ -10,6 +10,26 @@ export function createCopyStore(db) {
   const get = db.prepare('SELECT state, revision FROM copy_strategies WHERE environment = ? AND user_id = ?')
   const list = db.prepare(`SELECT user_id FROM copy_strategies WHERE environment = ? AND runnable = 1
     AND next_check <= ? AND lease_until <= ? AND ${eligible('user_id')} ORDER BY next_check LIMIT 4`)
+  const subscriptions = `WITH strategies AS (
+    SELECT user_id, state, coalesce(json_extract(state, '$.config.portfolioIds'),
+      json_array(json_extract(state, '$.config.portfolioId'))) AS portfolios
+    FROM copy_strategies WHERE environment = ? AND runnable = 1
+  ), subscriptions AS (
+    SELECT user_id, p.value AS portfolio_id, NULL AS since FROM strategies, json_each(portfolios) AS p
+    WHERE json_extract(state, '$.enabled') = 1
+    UNION ALL
+    SELECT user_id, coalesce(json_extract(p.value, '$.portfolioId'), json_extract(portfolios, '$[0]')),
+      json_extract(state, '$.since') FROM strategies, json_each(state, '$.positions') AS p
+    UNION ALL
+    SELECT user_id, coalesce(json_extract(state, '$.pending.portfolioId'), json_extract(portfolios, '$[0]')),
+      json_extract(state, '$.since') FROM strategies WHERE json_extract(state, '$.pending') IS NOT NULL
+  )`
+  const monitored = db.prepare(`${subscriptions} SELECT s.portfolio_id AS id, min(CASE WHEN s.since IS NOT NULL
+    THEN coalesce(json_extract(t.state, '$.feeds."' || s.portfolio_id || '".since'), s.since) END) AS since
+    FROM subscriptions AS s JOIN strategies AS t USING (user_id) WHERE s.portfolio_id IS NOT NULL GROUP BY s.portfolio_id`)
+  const wakeSignals = db.prepare(`${subscriptions} UPDATE copy_strategies SET next_check = 0
+    WHERE environment = ? AND runnable = 1 AND lease_until <= ? AND coalesce(json_extract(state, '$.retryAt'), 0) <= ?
+    AND user_id IN (SELECT user_id FROM subscriptions WHERE portfolio_id = ?)`)
   const exposed = db.prepare(`SELECT user_id AS userId, json_extract(p.value, '$.symbol') AS symbol,
     json_extract(p.value, '$.direction') AS direction, json_extract(p.value, '$.quantity') AS quantity,
     json_extract(p.value, '$.entryPrice') AS entryPrice, json_extract(s.state, '$.config.stopLoss') AS stopLoss
@@ -68,6 +88,8 @@ export function createCopyStore(db) {
     ready(environment, now, owners) {
       return list.all(environment, now, now, ...ownerFilter(owners)).map(row => row.user_id)
     },
+    monitoredPortfolios: environment => monitored.all(environment),
+    wakeSignals: (environment, portfolioId, now) => wakeSignals.run(environment, environment, now, now, portfolioId).changes > 0,
     exposures: (environment, now, owners) => exposed.all(environment, now, ...ownerFilter(owners)),
     wakeRisk: (environment, id, now) => wake.run(environment, id, now, now).changes === 1,
     claim(environment, id, owner, now) {

@@ -11,7 +11,7 @@ import {
   Timer,
 } from '@element-plus/icons-vue'
 import { usePortfolioHistory } from '../usePortfolioHistory'
-import { detailUrl, formatNumber, formatTradeAmount, formatTradeTime, shanghaiDate, tradeValue } from '../trades'
+import { detailUrl, formatAmount, formatNumber, formatTradeAmount, formatTradeTime, shanghaiDate, tradeValue } from '../trades'
 import { reportedPnl, summarizeReportedPnl } from '../pnl'
 import type { LeadPortfolio } from '../portfolios'
 import ClosedPositions from './ClosedPositions.vue'
@@ -120,9 +120,6 @@ const emptyState = computed(() => {
   if (query.value === 'recent' && syncing.value) return { title: '正在同步币安最近 24 小时的公开成交', detail: '' }
   return { title: '所选时段暂无已记录的成交', detail: '本地历史只覆盖工作台实际监控到的公开成交。' }
 })
-function signed(value: number) {
-  return (value > 0 ? '+' : '') + formatTradeAmount(value)
-}
 function pnlColor(value: number | null) {
   return value == null || value === 0 ? '' : value > 0 ? 'gain' : 'loss'
 }
@@ -152,7 +149,7 @@ function pnlColor(value: number | null) {
           class="profit-value"
           :class="pnlColor(item.pnl)"
         >
-          {{ signed(item.pnl) }}
+          {{ formatAmount(item.pnl, true) }}
           <small>{{ item.asset }}</small>
         </div>
         <div v-if="!summaries.length" class="profit-value empty-amount">—</div>
@@ -292,7 +289,7 @@ function pnlColor(value: number | null) {
                 </span>
               </td>
               <td class="numeric pnl-cell" :class="pnlColor(row.pnl)">
-                {{ row.pnl == null ? '—' : signed(row.pnl) }}
+                {{ formatAmount(row.pnl, true) }}
                 <small v-if="row.pnl != null">{{ row.quoteAsset }}</small>
               </td>
               <td>

@@ -76,3 +76,21 @@ test('disconnects back off, while removal of all holdings cancels reconnect and 
   await Promise.resolve()
   assert.equal(sockets[2].closed, true)
 })
+
+test('risk events wake the account for either side of the same symbol', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now })
+  const socket = fakeSocket()
+  const wake = t.mock.fn()
+  const watch = createMarkWatch(async () => socket, wake)
+  t.after(() => watch.close())
+  watch.update([position, { ...position, direction: 'SHORT' }])
+  await Promise.resolve()
+
+  socket.tick('94')
+  await Promise.resolve()
+  assert.equal(wake.mock.callCount(), 1)
+  t.mock.timers.tick(3000)
+  socket.tick('106')
+  await Promise.resolve()
+  assert.deepEqual(wake.mock.calls.map(call => call.arguments), [['alice'], ['alice']])
+})

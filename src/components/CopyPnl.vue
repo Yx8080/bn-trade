@@ -3,7 +3,7 @@ import { computed, ref, shallowRef, watch } from 'vue'
 import { Lock, Refresh } from '@element-plus/icons-vue'
 import { getCopyPnl, getPlatformPnl, getPlatformValuation, type PlatformValuation, type CopyAmount, type FuturesSession } from '../futures'
 import type { LeadPortfolio } from '../portfolios'
-import { formatNumber, formatTradeTime } from '../trades'
+import { formatAmount, formatFee, formatNumber, formatTradeTime } from '../trades'
 import ExchangeActivity from './ExchangeActivity.vue'
 
 const props = defineProps<{ session: FuturesSession | null; token: string; entries: LeadPortfolio[] }>()
@@ -93,9 +93,6 @@ const errors = computed(() => [
   { name: '跟单账本', ledger: copy }, { name: '手动订单账本', ledger: manual },
 ].filter(item => item.ledger.error.value).map(({ name, ledger }) => name + ' · ' + ledger.error.value
   + (ledger.snapshot.value ? ' 显示 ' + formatTradeTime(ledger.snapshot.value.at) + ' 的记录。' : '')))
-function pnl(value: number) {
-  return (value > 0 ? '+' : '') + formatNumber(value)
-}
 </script>
 
 <template>
@@ -118,9 +115,9 @@ function pnl(value: number) {
         <div v-if="settledTotals?.length" class="table-scroll">
           <table class="pnl-totals"><thead><tr><th>币种</th><th v-for="item in columns" :key="item.key" class="numeric">{{ item.label }}</th></tr></thead>
             <tbody><tr v-for="item in settledTotals" :key="item.asset">
-              <th scope="row">{{ item.asset }}</th><td class="numeric">{{ pnl(item.realized) }}</td>
-              <td class="numeric">{{ formatNumber(item.fees) }}</td>
-              <td class="numeric pnl-cell" :class="{gain: item.net > 0, loss: item.net < 0}">{{ pnl(item.net) }}</td>
+              <th scope="row">{{ item.asset }}</th><td class="numeric">{{ formatAmount(item.realized, true) }}</td>
+              <td class="numeric">{{ formatFee(item.fees) }}</td>
+              <td class="numeric pnl-cell" :class="{gain: item.net > 0, loss: item.net < 0}">{{ formatAmount(item.net, true) }}</td>
             </tr></tbody>
           </table>
         </div>
@@ -130,10 +127,10 @@ function pnl(value: number) {
       <section class="panel">
         <div class="ledger-heading"><h2>合约持仓未实现盈亏</h2></div>
         <dl class="position-marks">
-          <div><dt>跟单份额估值</dt><dd>{{ !copyData ? '暂未读取' : !copyData.openCount ? '暂无持仓' : copyData.unrealized == null ? '等待估值' : pnl(copyData.unrealized) + ' USDT' }}</dd></div>
+          <div><dt>跟单份额估值</dt><dd>{{ !copyData ? '暂未读取' : !copyData.openCount ? '暂无持仓' : copyData.unrealized == null ? '等待估值' : formatAmount(copyData.unrealized, true) + ' USDT' }}</dd></div>
           <div v-for="row in valuation?.manualPositions" :key="row.symbol + row.positionSide">
             <dt>手动 · {{ row.symbol }} {{ row.positionSide === 'BOTH' ? '' : row.positionSide === 'LONG' ? '多' : '空' }}</dt>
-            <dd>{{ row.unrealized == null ? '待核实' : pnl(row.unrealized) + ' USDT' }}</dd>
+            <dd>{{ row.unrealized == null ? '待核实' : formatAmount(row.unrealized, true) + ' USDT' }}</dd>
           </div>
           <div v-if="!valuation?.manualPositions.length"><dt>平台手动</dt><dd>{{ !valuation || valuation.valuationError ? '暂未取得估值' : '暂无可归属持仓' }}</dd></div>
         </dl>
@@ -149,8 +146,8 @@ function pnl(value: number) {
       <div v-if="valuation?.spot.length" class="table-scroll"><table>
         <thead><tr><th>交易对</th><th class="numeric">买入数量</th><th class="numeric">成本（USDT）</th><th class="numeric">估计市值（USDT）</th><th class="numeric">未实现盈亏（USDT）</th></tr></thead>
         <tbody><tr v-for="row in valuation.spot" :key="row.symbol"><td>{{ row.symbol }}</td>
-          <td class="numeric">{{ formatNumber(row.quantity) }}</td><td class="numeric">{{ formatNumber(row.cost) }}</td>
-          <td class="numeric">{{ formatNumber(row.value) }}</td><td class="numeric">{{ row.unrealized == null ? '待估值' : pnl(row.unrealized) }}</td>
+          <td class="numeric">{{ formatNumber(row.quantity) }}</td><td class="numeric">{{ formatAmount(row.cost) }}</td>
+          <td class="numeric">{{ formatAmount(row.value) }}</td><td class="numeric">{{ row.unrealized == null ? '待估值' : formatAmount(row.unrealized, true) }}</td>
         </tr></tbody>
       </table></div>
       <p v-else class="pnl-note">{{ valuation ? '暂无平台现货买入记录。' : '现货估值暂未返回。' }}</p>
@@ -172,7 +169,7 @@ function pnl(value: number) {
             <td class="numeric">{{ formatNumber(row.quantity) }}</td><td class="numeric">{{ formatNumber(row.price) }}</td>
             <td v-if="!row.settled && !row.amounts.length" colspan="3" class="numeric">待结算</td>
             <template v-else><td v-for="col in columns" :key="col.key" class="numeric">
-              <div v-for="amount in row.amounts" :key="amount.asset">{{ col.key === 'fees' ? formatNumber(amount.fees) : pnl(amount[col.key]) }} <small>{{ amount.asset }}</small></div>
+              <div v-for="amount in row.amounts" :key="amount.asset">{{ col.key === 'fees' ? formatFee(amount.fees) : formatAmount(amount[col.key], true) }} <small>{{ amount.asset }}</small></div>
               <span v-if="!row.amounts.length">—</span>
             </td></template>
           </tr></tbody>

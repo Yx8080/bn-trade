@@ -98,10 +98,10 @@ test('account reports wallet, available balance and exchange-valued open positio
       assets: [{ asset: 'USDT', walletBalance: '14', availableBalance: '8.9' }],
     } : [
       { symbol: 'BTCUSDT', positionSide: 'SHORT', positionAmt: '-0.001', entryPrice: '90000', markPrice: '90800',
-        unRealizedProfit: '-0.8', marginAsset: 'USDT', updateTime: 123 },
+        unRealizedProfit: '-0.8', positionInitialMargin: '1.6', openOrderInitialMargin: '10', marginAsset: 'USDT', updateTime: 123 },
       { symbol: 'ETHUSDT', positionAmt: '0' },
       { symbol: 'BTCUSDC', positionSide: 'LONG', positionAmt: '1', entryPrice: '90000', markPrice: '91000',
-        unRealizedProfit: '1000', marginAsset: 'USDC', updateTime: 123 },
+        unRealizedProfit: '1000', positionInitialMargin: '0', marginAsset: 'USDC', updateTime: 123 },
     ])
   })
   const response = await send('account?userId=alice', users[1])
@@ -109,7 +109,7 @@ test('account reports wallet, available balance and exchange-valued open positio
   assert.deepEqual(await response.json(), {
     name: 'bob', environment: 'live', balances: [{ asset: 'USDT', walletBalance: '14', availableBalance: '8.9' }],
     positions: [{ symbol: 'BTCUSDT', positionSide: 'SHORT', quantity: '-0.001', entryPrice: '90000',
-      markPrice: '90800', unrealizedPnl: '-0.8', marginAsset: 'USDT', updateTime: 123 },
+      markPrice: '90800', unrealizedPnl: '-0.8', positionInitialMargin: '1.6', marginAsset: 'USDT', updateTime: 123 },
     { symbol: 'BTCUSDC', positionSide: 'LONG', quantity: '1', entryPrice: '90000',
       markPrice: '91000', unrealizedPnl: '1000', marginAsset: 'USDC', updateTime: 123 }],
   })

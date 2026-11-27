@@ -253,7 +253,6 @@ watch(
   />
   <AccountOverview
     :market="market"
-    :symbol="symbol"
     :entries="entries"
     :token="token"
     :session="activeSession"

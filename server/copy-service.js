@@ -10,6 +10,7 @@ import { ledgerIdentity } from './platform-store.js'
 const interval = 5000
 const keyIdentity = user => ledgerIdentity(user.id, user.apiKey)
 const busy = () => new ApiError(409, 'COPY_CHANGED', '跟单状态刚刚更新，请刷新后重试。')
+const oldMonitorWarning = /^组合 \d+ (?:带单成交监控暂不可用|无法取得带单成交|尚未核实带单员是否平仓)。/
 
 export function settlementAmounts(fills, expectedQuantity) {
   const totals = new Map()
@@ -70,6 +71,12 @@ function parseConfig(input) {
 }
 
 function restoreState(state) {
+  // Older strategies recorded collector errors alongside execution errors.
+  if (state.error) {
+    for (const { message } of state.events) {
+      if (oldMonitorWarning.test(message)) state.error = state.error.replace(message, '').trim()
+    }
+  }
   if (state.config) {
     state.config = parseConfig(state.config)
     if (state.config.portfolioIds.length === 1) {
@@ -95,8 +102,7 @@ export function createCopyService(env, exchangeFor = createCopyExchange) {
     const db = store()
     if (!db.claim(environment, id, owner, Date.now())) return
     let leaseLost = false
-    // Reading several paginated leaders can outlast one lease. Only the original
-    // owner can extend a still-valid lease; a crashed process stops renewing.
+    // Account checks and order reconciliation can outlast one lease.
     const heartbeat = setInterval(() => {
       if (leaseLost || stopped) return
       try { leaseLost = !db.renew(environment, id, owner, Date.now()) }
@@ -120,7 +126,8 @@ export function createCopyService(env, exchangeFor = createCopyExchange) {
         return
       }
       state.openedAfter = Math.max(state.openedAfter ?? state.since, startedAt, user.futuresConnectedAt ?? 0)
-      await runCopyTick(state, exchangeFor(env, user, environment), save)
+      const exchange = exchangeFor(env, user, environment)
+      await runCopyTick(state, exchange, save, Date.now(), exchange.signals ?? env.orderStore.copySignals.read)
       delay = Math.max(interval, (state.retryAt ?? 0) - Date.now())
     } finally {
       clearInterval(heartbeat)
@@ -190,6 +197,14 @@ export function createCopyService(env, exchangeFor = createCopyExchange) {
   timer.unref()
 
   return {
+    notifyPortfolio(portfolioId) {
+      if (stopped) return
+      try {
+        if (store().wakeSignals(getTradingEnvironment(env), portfolioId, Date.now())) poll()
+      } catch (error) {
+        console.warn('无法通知跟单任务', error?.code ?? error?.name)
+      }
+    },
     async fetch(request) {
       try {
         const user = await getTradingUser(request, env)
